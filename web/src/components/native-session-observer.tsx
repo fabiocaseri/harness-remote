@@ -320,11 +320,19 @@ export function NativeSessionObserver({
     if (machine.machineID !== target.machineID) {
       return available.length ? [{ ...machine, agents: available }] : []
     }
+    // The machine snapshot advertises `profile.capabilities`, a static table that cannot know
+    // whether this harness accepts images: that answer only exists after the ACP handshake, which
+    // is what `/v1/capabilities` reports and what `agent` above already carries. Taking `available`
+    // verbatim dropped the one field the snapshot has no way to fill, so the composer read
+    // `attachments: undefined` for an OMP that advertises `promptCapabilities.image` and hid the
+    // picker on every harness.
     const current = available.some((candidate) => candidate.id === target.agentID)
-      ? available
+      ? available.map((candidate) => candidate.id === target.agentID
+        ? { ...candidate, capabilities: { ...candidate.capabilities, attachments: attachmentsSupported } }
+        : candidate)
       : [agent, ...available.filter((candidate) => candidate.id !== target.agentID)]
     return [{ ...machine, agents: current }]
-  }), [routes, target.machineID, target.agentID, agent])
+  }), [routes, target.machineID, target.agentID, agent, attachmentsSupported])
 
   // Keep the mature composer scoped to same-machine harness switching. Cross-machine continuation
   // has a separate explicit panel until that newer state machine has enough product-smoke coverage

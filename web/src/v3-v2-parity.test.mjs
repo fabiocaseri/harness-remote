@@ -96,6 +96,12 @@ test("Session-first restores capability-gated image attachments without reviving
   assert.match(nativePrompt, /attachments: AttachmentPart\[\] = \[\]/)
   assert.match(nativePrompt, /attachmentKeys/)
   assert.match(nativeObserver, /api\.capabilities\(target\.config\)/)
+  // Fetching the capability is not the same as delivering it. The composer reads
+  // `attachments` off the agent it is about to send to, and that agent comes from the routed
+  // machine list, whose entries are the daemon's static `profile.capabilities` table. Without
+  // this merge the live ACP answer never reaches the gate and the paperclip stays hidden on
+  // every harness, image-capable or not.
+  assert.match(nativeObserver, /capabilities: \{ \.\.\.candidate\.capabilities, attachments: attachmentsSupported \}/)
   assert.doesNotMatch(nativeObserver, /SessionComposer/)
 })
 
