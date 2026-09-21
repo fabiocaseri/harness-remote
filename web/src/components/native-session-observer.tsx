@@ -5,6 +5,7 @@ import type { NativeSessionSurfaceTarget } from "../native-session-discovery"
 import { canCreateNativeSession } from "../native-session-create"
 import { resolveNativeSessionTargetModel } from "../native-session-model"
 import { openCodeAssistantProvesTurnCompleted } from "../native-session-opencode-reconciliation"
+import { routeCurrentNativeSessionAgents } from "../native-session-route-capabilities"
 import {
   continueNativeSessionOnRoute,
   type NativeSessionRouteContinueInput,
@@ -326,11 +327,7 @@ export function NativeSessionObserver({
     // verbatim dropped the one field the snapshot has no way to fill, so the composer read
     // `attachments: undefined` for an OMP that advertises `promptCapabilities.image` and hid the
     // picker on every harness.
-    const current = available.some((candidate) => candidate.id === target.agentID)
-      ? available.map((candidate) => candidate.id === target.agentID
-        ? { ...candidate, capabilities: { ...candidate.capabilities, attachments: attachmentsSupported } }
-        : candidate)
-      : [agent, ...available.filter((candidate) => candidate.id !== target.agentID)]
+    const current = routeCurrentNativeSessionAgents(available, target.agentID, agent, attachmentsSupported)
     return [{ ...machine, agents: current }]
   }), [routes, target.machineID, target.agentID, agent, attachmentsSupported])
 

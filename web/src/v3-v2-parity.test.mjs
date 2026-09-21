@@ -32,6 +32,7 @@ const messageContent = read("components/taskdesk-message-content.tsx")
 const workThread = read("components/work-thread-conversation.tsx")
 const nativePrompt = read("native-session-prompt.ts")
 const nativeObserver = read("components/native-session-observer.tsx")
+const routeCapabilities = read("native-session-route-capabilities.ts")
 
 test("a conversation can be copied out of, as it could in 2.x", () => {
   // 3.0 shipped with no copy affordance anywhere: `clipboard.ts` existed but only the retired shell
@@ -101,7 +102,8 @@ test("Session-first restores capability-gated image attachments without reviving
   // machine list, whose entries are the daemon's static `profile.capabilities` table. Without
   // this merge the live ACP answer never reaches the gate and the paperclip stays hidden on
   // every harness, image-capable or not.
-  assert.match(nativeObserver, /capabilities: \{ \.\.\.candidate\.capabilities, attachments: attachmentsSupported \}/)
+  assert.match(nativeObserver, /routeCurrentNativeSessionAgents\(available, target\.agentID, agent, attachmentsSupported\)/)
+  assert.match(routeCapabilities, /capabilities: \{ \.\.\.candidate\.capabilities, attachments: attachmentsSupported \}/)
   assert.doesNotMatch(nativeObserver, /SessionComposer/)
 })
 
