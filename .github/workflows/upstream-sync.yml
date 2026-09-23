@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Checkout fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -27,7 +27,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ vars.FABIOCASERI_AUTOMATION_CLIENT_ID }}
+          client-id: ${{ vars.FABIOCASERI_AUTOMATION_CLIENT_ID }}
           private-key: ${{ secrets.FABIOCASERI_AUTOMATION_PRIVATE_KEY }}
           owner: fabiocaseri
           repositories: harness-remote
@@ -46,6 +46,7 @@ jobs:
           BOT_ID="$(gh api "/users/${BOT_LOGIN}" --jq '.id')"
           echo "login=${BOT_LOGIN}" >> "$GITHUB_OUTPUT"
           echo "email=${BOT_ID}+${BOT_LOGIN}@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+          echo "Authenticated as ${BOT_LOGIN}."
 
       - name: Resolve latest stable upstream release
         id: release
@@ -66,12 +67,16 @@ jobs:
             exit 0
           fi
 
-          if git merge-base --is-ancestor "$TAG" HEAD 2>/dev/null; then
+          git remote add upstream https://github.com/giuliastro/harness-remote.git
+          git fetch upstream "refs/tags/${TAG}:refs/tags/${TAG}" --force
+
+          if git merge-base --is-ancestor "$TAG" HEAD; then
             echo "Stable release ${TAG} is already present in the fork."
             echo "needed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
+          echo "Stable release ${TAG} is newer than the fork."
           echo "needed=true" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "url=${RELEASE_URL}" >> "$GITHUB_OUTPUT"
@@ -90,16 +95,17 @@ jobs:
 
           git config user.name "$BOT_LOGIN"
           git config user.email "$BOT_EMAIL"
-          git remote add upstream https://github.com/giuliastro/harness-remote.git
-          git fetch upstream --tags --force
-
-          # Recreate the automation branch from the fork's current main so a
-          # rerun repairs an interrupted/stale automation branch deterministically.
           git checkout -B "$BRANCH" "origin/${GITHUB_REF_NAME}"
 
           # Merge the exact stable release tag. A conflict intentionally fails
-          # the workflow instead of silently rewriting fork-specific changes.
+          # instead of silently rewriting fork-specific changes.
           git merge --no-ff "$TAG" -m "chore: sync Harness Remote ${TAG}"
+
+          # Defensive guard: never create/update an empty sync branch.
+          if git diff --quiet "origin/${GITHUB_REF_NAME}...HEAD"; then
+            echo "No commits differ from ${GITHUB_REF_NAME}; nothing to publish."
+            exit 0
+          fi
 
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push --force-with-lease origin "$BRANCH"
@@ -130,6 +136,11 @@ jobs:
           BRANCH: ${{ steps.release.outputs.branch }}
         run: |
           set -euo pipefail
+
+          if git diff --quiet "origin/${GITHUB_REF_NAME}...HEAD"; then
+            echo "No commits differ from ${GITHUB_REF_NAME}; no PR required."
+            exit 0
+          fi
 
           CURRENT_VERSION="$(git describe --tags --abbrev=0 "origin/${GITHUB_REF_NAME}" 2>/dev/null || echo unknown)"
           TITLE="chore: sync Harness Remote ${TAG}"
