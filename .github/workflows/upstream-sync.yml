@@ -1,0 +1,177 @@
+name: Upstream stable release sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 7 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-stable-release-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.FABIOCASERI_AUTOMATION_CLIENT_ID }}
+          private-key: ${{ secrets.FABIOCASERI_AUTOMATION_PRIVATE_KEY }}
+          owner: fabiocaseri
+          repositories: harness-remote
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Resolve bot identity
+        id: bot
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          BOT_LOGIN="${APP_SLUG}[bot]"
+          BOT_ID="$(gh api "/users/${BOT_LOGIN}" --jq '.id')"
+          echo "login=${BOT_LOGIN}" >> "$GITHUB_OUTPUT"
+          echo "email=${BOT_ID}+${BOT_LOGIN}@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve latest stable upstream release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          RELEASE_JSON="$(gh api /repos/giuliastro/harness-remote/releases/latest)"
+          TAG="$(jq -r '.tag_name' <<<"$RELEASE_JSON")"
+          PRERELEASE="$(jq -r '.prerelease' <<<"$RELEASE_JSON")"
+          DRAFT="$(jq -r '.draft' <<<"$RELEASE_JSON")"
+          RELEASE_URL="$(jq -r '.html_url' <<<"$RELEASE_JSON")"
+
+          if [[ "$PRERELEASE" != "false" || "$DRAFT" != "false" ]]; then
+            echo "Latest upstream release is not stable; nothing to do."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git merge-base --is-ancestor "$TAG" HEAD 2>/dev/null; then
+            echo "Stable release ${TAG} is already present in the fork."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "needed=true" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "url=${RELEASE_URL}" >> "$GITHUB_OUTPUT"
+          echo "branch=upstream-sync/${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Sync stable release into branch
+        if: steps.release.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BOT_LOGIN: ${{ steps.bot.outputs.login }}
+          BOT_EMAIL: ${{ steps.bot.outputs.email }}
+          TAG: ${{ steps.release.outputs.tag }}
+          BRANCH: ${{ steps.release.outputs.branch }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "$BOT_LOGIN"
+          git config user.email "$BOT_EMAIL"
+          git remote add upstream https://github.com/giuliastro/harness-remote.git
+          git fetch upstream --tags --force
+
+          # Recreate the automation branch from the fork's current main so a
+          # rerun repairs an interrupted/stale automation branch deterministically.
+          git checkout -B "$BRANCH" "origin/${GITHUB_REF_NAME}"
+
+          # Merge the exact stable release tag. A conflict intentionally fails
+          # the workflow instead of silently rewriting fork-specific changes.
+          git merge --no-ff "$TAG" -m "chore: sync Harness Remote ${TAG}"
+
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force-with-lease origin "$BRANCH"
+
+      - name: Ensure automation labels
+        if: steps.release.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh label create automation \
+            --repo "$GITHUB_REPOSITORY" \
+            --description "Created or maintained by automation" \
+            --color "1D76DB" \
+            --force
+          gh label create upstream-sync \
+            --repo "$GITHUB_REPOSITORY" \
+            --description "Synchronizes a stable upstream release" \
+            --color "5319E7" \
+            --force
+
+      - name: Create or update pull request
+        if: steps.release.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_URL: ${{ steps.release.outputs.url }}
+          BRANCH: ${{ steps.release.outputs.branch }}
+        run: |
+          set -euo pipefail
+
+          CURRENT_VERSION="$(git describe --tags --abbrev=0 "origin/${GITHUB_REF_NAME}" 2>/dev/null || echo unknown)"
+          TITLE="chore: sync Harness Remote ${TAG}"
+
+          BODY_FILE="$(mktemp)"
+          trap 'rm -f "$BODY_FILE"' EXIT
+
+          cat > "$BODY_FILE" <<EOF
+          Automated upstream sync for Harness Remote.
+
+          - Current fork version: \`${CURRENT_VERSION}\`
+          - Latest stable upstream version: \`${TAG}\`
+          - Upstream repository: \`giuliastro/harness-remote\`
+          - Upstream release / changelog: ${RELEASE_URL}
+          - Prerelease: \`false\`
+          - Merge remains manual.
+
+          Review the upstream release notes and CI results before merging.
+          EOF
+
+          EXISTING_PR="$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --head "$BRANCH" \
+            --base "$GITHUB_REF_NAME" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [[ -n "$EXISTING_PR" ]]; then
+            gh pr edit "$EXISTING_PR" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TITLE" \
+              --body-file "$BODY_FILE" \
+              --add-label automation \
+              --add-label upstream-sync
+          else
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base "$GITHUB_REF_NAME" \
+              --head "$BRANCH" \
+              --title "$TITLE" \
+              --body-file "$BODY_FILE" \
+              --label automation \
+              --label upstream-sync
+          fi
