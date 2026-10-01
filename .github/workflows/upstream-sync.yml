@@ -34,6 +34,7 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
           permission-issues: write
+          permission-workflows: write
 
       - name: Resolve bot identity
         id: bot
