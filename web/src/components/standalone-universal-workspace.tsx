@@ -62,6 +62,7 @@ import "../machine-manager-health.css"
 /** The 2.x shell persisted its sidebar width and this one did not, so a large monitor got the same
  *  rail as a laptop. Its own key: the two shells have different rails and different defaults. */
 const RAIL_WIDTH_STORAGE_KEY = "harness-remote.sessionRailWidth.v1"
+const SESSION_FOCUS_STORAGE_KEY = "harness-remote.sessionFocusMode.v1"
 const RAIL_WIDTH_MIN = 260
 const RAIL_WIDTH_MAX = 620
 /** One arrow press. Wide enough to be worth pressing, small enough to land on an exact width. */
@@ -94,6 +95,14 @@ function loadRailWidth(): number | null {
     return Number.isFinite(raw) && raw > 0 ? clampRailWidth(raw) : null
   } catch {
     return null
+  }
+}
+
+function loadSessionFocusMode(): boolean {
+  try {
+    return localStorage.getItem(SESSION_FOCUS_STORAGE_KEY) === "true"
+  } catch {
+    return false
   }
 }
 
@@ -463,6 +472,22 @@ function NativeSessionsWorkspace({
   onAttentionCountChange: (count: number) => void
 }) {
   const t = useTranslator()
+  // What is waiting for the user - input requests and finished replies not opened yet - shows in
+  // the window title, the one place it is visible while Harness Remote is a background tab.
+  const [waitingCounts, setWaitingCounts] = useState({ attention: 0, ready: 0 })
+  const handleAttentionCountChange = useCallback((count: number) => {
+    onAttentionCountChange(count)
+    setWaitingCounts((current) => current.attention === count ? current : { ...current, attention: count })
+  }, [onAttentionCountChange])
+  const handleUnseenReadyCountChange = useCallback((count: number) => {
+    setWaitingCounts((current) => current.ready === count ? current : { ...current, ready: count })
+  }, [])
+  const baseTitleRef = useRef(typeof document === "undefined" ? "" : document.title)
+  useEffect(() => {
+    const waiting = waitingCounts.attention + waitingCounts.ready
+    document.title = waiting ? `(${waiting}) ${baseTitleRef.current}` : baseTitleRef.current
+  }, [waitingCounts])
+  useEffect(() => () => { document.title = baseTitleRef.current }, [])
   const [runtimes, setRuntimes] = useState<NativeMachineRuntime[]>(() =>
     machines.map((machine) => ({ machine, snapshot: null, state: "loading", consecutiveFailures: 0 }))
   )
@@ -502,6 +527,7 @@ function NativeSessionsWorkspace({
   // is actually waiting for. See the startup states below.
   const [sessionsDiscovered, setSessionsDiscovered] = useState(machines.length === 0)
   const [railWidth, setRailWidth] = useState<number | null>(loadRailWidth)
+  const [sessionFocusMode, setSessionFocusMode] = useState(loadSessionFocusMode)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const refreshGeneration = useRef(0)
   const pendingSessionRefreshToken = useRef<number | null>(null)
@@ -901,6 +927,14 @@ function NativeSessionsWorkspace({
 
   const handleSessionDeletionSettled = clearSessionDeleting
 
+  function toggleSessionFocusMode() {
+    setSessionFocusMode((current) => {
+      const next = !current
+      try { localStorage.setItem(SESSION_FOCUS_STORAGE_KEY, String(next)) } catch {}
+      return next
+    })
+  }
+
   function handleSessionRenamed(session: Session, title: string) {
     const nextTitle = session.title?.trim() || title
     setSelected((current) => current ? { ...current, title: nextTitle } : current)
@@ -939,7 +973,7 @@ function NativeSessionsWorkspace({
   ], [onManageMachines, onManageSettings, requestRefresh, selected, t])
 
   return (
-    <section className="tdw-shell hr-control-plane hr-native-workspace" aria-label={t("nav.sessions")}>
+    <section className={`tdw-shell hr-control-plane hr-native-workspace${sessionFocusMode ? " session-focus-mode" : ""}`} aria-label={t("nav.sessions")}>
       <header className="tdw-topbar hr-topbar">
         <div className="tdw-brand hr-brand"><img className="tdw-logo hr-logo hr-app-icon" src={`${import.meta.env.BASE_URL}icon-192.png`} alt="" width={32} height={32} /><div><strong>Harness Remote</strong><small>{t("sf.brandTagline")}</small></div></div>
         <div className="tdw-context-path" aria-label={t("sf.workspaceContext")}>
@@ -954,6 +988,18 @@ function NativeSessionsWorkspace({
           </span>
           <button type="button" className="tdw-button secondary tdw-machines-button" onClick={onManageMachines}><ServerIcon size={15} /> {t("sf.machines")}</button>
           <button type="button" className="palette-hint" onClick={() => setPaletteOpen(true)} title="Command palette"><span>⌘K</span></button>
+          {selected ? (
+            <button
+              type="button"
+              className="tdw-icon-button hr-session-focus-toggle"
+              onClick={toggleSessionFocusMode}
+              title={sessionFocusMode ? t("sf.showSessionControls") : t("sf.hideSessionControls")}
+              aria-label={sessionFocusMode ? t("sf.showSessionControls") : t("sf.hideSessionControls")}
+              aria-pressed={sessionFocusMode}
+            >
+              <ChatIcon size={16} />
+            </button>
+          ) : null}
           <button type="button" className="tdw-icon-button" onClick={onManageSettings} title={t("nav.settings")} aria-label={t("nav.settings")}><SettingsIcon size={16} /></button>
           <button type="button" className="tdw-icon-button hr-refresh-button" onClick={() => requestRefresh("toolbar")} title={toolbarRefreshing ? t("sf.refreshingMachines") : t("sf.refresh")} aria-label={toolbarRefreshing ? t("sf.refreshingMachines") : t("sf.refresh")} aria-busy={toolbarRefreshing || undefined} disabled={workspaceRefreshing}>
             {toolbarRefreshing ? <LoadingIcon size={16} /> : <RefreshIcon size={16} />}
@@ -970,7 +1016,8 @@ function NativeSessionsWorkspace({
             onOpen={openSession}
             refreshToken={listRevision}
             authoritativeRefreshToken={authoritativeListRevision}
-            onAttentionCountChange={onAttentionCountChange}
+            onAttentionCountChange={handleAttentionCountChange}
+            onUnseenReadyCountChange={handleUnseenReadyCountChange}
             onDiscoveredChange={setSessionsDiscovered}
             onRefreshComplete={completeSessionRefresh}
             selectedKey={selected?.key}
@@ -1008,7 +1055,10 @@ function NativeSessionsWorkspace({
             <>
               <button type="button" className="tdw-mobile-back" onClick={() => setMobileDetailOpen(false)} aria-label={t("sf.backToSessions")}>← {t("nav.sessions")}</button>
               <header className="hr-native-workspace-session-header">
-                <div className="hr-native-session-heading">
+                <div
+                  className="hr-native-session-heading"
+                  title={[selected.external ? t("sf.startedInHarness") : t("sf.createdInHarnessRemote"), selected.directory].filter(Boolean).join(" · ")}
+                >
                   <div className="hr-native-session-eyebrow">
                     <span>{selected.agentLabel}</span>
                     {selected.nativeAgent ? <><i aria-hidden="true">/</i><span>{selected.nativeAgent}</span></> : null}

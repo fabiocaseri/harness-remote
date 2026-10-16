@@ -121,6 +121,9 @@ type TranslationKey =
   | 'detail.jumpToLatest'
   | 'detail.you'
   | 'detail.opencode'
+  | 'detail.opencode2'
+  | 'detail.copilot'
+  | 'detail.mimo'
   | 'detail.projectDashboardLabel'
   | 'detail.projectLabel'
   | 'detail.vcsLabel'
@@ -213,10 +216,13 @@ type TranslationKey =
   | 'connect.step.address'
   | 'connect.step.credentials'
   | 'connect.harness.opencode'
+  | 'connect.harness.opencode2'
   | 'connect.harness.omp'
   | 'connect.harness.pi'
   | 'connect.harness.claude'
   | 'connect.harness.codex'
+  | 'connect.harness.copilot'
+  | 'connect.harness.mimo'
   | 'connect.addressHint'
   | 'connect.runOnHost'
   | 'connect.copyCommand'
@@ -311,6 +317,8 @@ type TranslationKey =
   | 'sf.machines'
   | 'sf.refresh'
   | 'sf.refreshingMachines'
+  | 'sf.hideSessionControls'
+  | 'sf.showSessionControls'
   | 'sf.refreshingSessions'
   | 'sf.machineCount'
   | 'sf.connecting'
@@ -350,6 +358,8 @@ type TranslationKey =
   | 'sf.noSessionsOnMachine'
   | 'sf.attentionCount'
   | 'sf.liveCount'
+  | 'sf.readyCount'
+  | 'sf.unseenResult'
   | 'sf.offline'
   | 'sf.statusWorking'
   | 'sf.statusReady'
@@ -604,7 +614,10 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.send': 'Send',
     'detail.jumpToLatest': 'Go to latest',
     'detail.you': '👤 You',
-    'detail.opencode': '🤖 OpenCode',
+    'detail.opencode': '🤖 OpenCode Legacy',
+    'detail.opencode2': '🤖 OpenCode 2',
+    'detail.copilot': '🤖 GitHub Copilot CLI',
+    'detail.mimo': '🤖 MiMo Code',
     'detail.projectDashboardLabel': 'Project and VCS dashboard',
     'detail.projectLabel': 'Project',
     'detail.vcsLabel': 'VCS',
@@ -763,11 +776,14 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'connect.step.harness': 'Harness',
     'connect.step.address': 'Address',
     'connect.step.credentials': 'Credentials',
-    'connect.harness.opencode': 'Connect directly to an OpenCode server.',
+    'connect.harness.opencode': 'Connect directly to an OpenCode Legacy server.',
+    'connect.harness.opencode2': 'Connect to OpenCode 2 through the ACP bridge.',
     'connect.harness.omp': 'Connect through the bundled Oh My Pi bridge.',
     'connect.harness.pi': 'Connect to PI through the ACP bridge.',
     'connect.harness.claude': 'Connect to Claude Code through the ACP bridge.',
     'connect.harness.codex': 'Connect to Codex CLI through the ACP bridge.',
+    'connect.harness.copilot': 'Connect to GitHub Copilot CLI through the ACP bridge.',
+    'connect.harness.mimo': 'Connect to MiMo Code through the ACP bridge.',
     'connect.addressHint': 'Use the LAN address of the machine that runs the harness.',
     'connect.runOnHost': 'Run on the host machine',
     'connect.copyCommand': 'Copy command',
@@ -795,6 +811,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.machines': 'Machines',
     'sf.refresh': 'Refresh',
     'sf.refreshingMachines': 'Refreshing machines',
+    'sf.hideSessionControls': 'Hide Session controls',
+    'sf.showSessionControls': 'Show Session controls',
     'sf.refreshingSessions': 'Refreshing Sessions',
     'sf.machineCount': '{online}/{total} machines',
     'sf.connecting': 'Connecting',
@@ -834,6 +852,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.noSessionsOnMachine': 'No native Sessions discovered on this machine.',
     'sf.attentionCount': '{count} attention',
     'sf.liveCount': '{count} live',
+    'sf.readyCount': '{count} ready',
+    'sf.unseenResult': 'new result',
     'sf.offline': 'Offline',
     'sf.statusWorking': 'Working',
     'sf.statusReady': 'Ready',
@@ -1088,7 +1108,10 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.send': 'Invia',
     'detail.jumpToLatest': 'Vai alla fine',
     'detail.you': '👤 Tu',
-    'detail.opencode': '🤖 OpenCode',
+    'detail.opencode': '🤖 OpenCode Legacy',
+    'detail.opencode2': '🤖 OpenCode 2',
+    'detail.copilot': '🤖 GitHub Copilot CLI',
+    'detail.mimo': '🤖 MiMo Code',
     'detail.projectDashboardLabel': 'Dashboard progetto e VCS',
     'detail.projectLabel': 'Progetto',
     'detail.vcsLabel': 'VCS',
@@ -1247,11 +1270,14 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'connect.step.harness': 'Harness',
     'connect.step.address': 'Indirizzo',
     'connect.step.credentials': 'Credenziali',
-    'connect.harness.opencode': 'Connessione diretta a un server OpenCode.',
+    'connect.harness.opencode': 'Connessione diretta a un server OpenCode Legacy.',
+    'connect.harness.opencode2': 'Connessione a OpenCode 2 tramite bridge ACP.',
     'connect.harness.omp': 'Connessione tramite il bridge incluso per Oh My Pi.',
     'connect.harness.pi': 'Connessione a PI tramite bridge ACP.',
     'connect.harness.claude': 'Connessione a Claude Code tramite bridge ACP.',
     'connect.harness.codex': 'Connessione a Codex CLI tramite bridge ACP.',
+    'connect.harness.copilot': 'Connessione a GitHub Copilot CLI tramite bridge ACP.',
+    'connect.harness.mimo': 'Connessione a MiMo Code tramite bridge ACP.',
     'connect.addressHint': 'Usa l’indirizzo LAN del computer che esegue l’harness.',
     'connect.runOnHost': 'Esegui sul computer host',
     'connect.copyCommand': 'Copia comando',
@@ -1279,6 +1305,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.machines': 'Macchine',
     'sf.refresh': 'Aggiorna',
     'sf.refreshingMachines': 'Aggiornamento macchine',
+    'sf.hideSessionControls': 'Nascondi controlli sessione',
+    'sf.showSessionControls': 'Mostra controlli sessione',
     'sf.refreshingSessions': 'Aggiornamento sessioni',
     'sf.machineCount': '{online}/{total} macchine',
     'sf.connecting': 'Connessione',
@@ -1318,6 +1346,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.noSessionsOnMachine': 'Nessuna sessione nativa trovata su questa macchina.',
     'sf.attentionCount': '{count} da vedere',
     'sf.liveCount': '{count} attive',
+    'sf.readyCount': '{count} pronte',
+    'sf.unseenResult': 'nuovo risultato',
     'sf.offline': 'Offline',
     'sf.statusWorking': 'In lavorazione',
     'sf.statusReady': 'Pronta',
@@ -1572,7 +1602,10 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.send': '傳送',
     'detail.jumpToLatest': '前往最新',
     'detail.you': '👤 你',
-    'detail.opencode': '🤖 OpenCode',
+    'detail.opencode': '🤖 OpenCode Legacy',
+    'detail.opencode2': '🤖 OpenCode 2',
+    'detail.copilot': '🤖 GitHub Copilot CLI',
+    'detail.mimo': '🤖 MiMo Code',
     'detail.projectDashboardLabel': '專案與 VCS 儀表板',
     'detail.projectLabel': '專案',
     'detail.vcsLabel': 'VCS',
@@ -1664,11 +1697,14 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'connect.step.harness': 'Harness',
     'connect.step.address': '位址',
     'connect.step.credentials': '認證資訊',
-    'connect.harness.opencode': '直接連線到 OpenCode 伺服器。',
+    'connect.harness.opencode': '直接連線到 OpenCode Legacy 伺服器。',
+    'connect.harness.opencode2': '透過 ACP bridge 連線到 OpenCode 2。',
     'connect.harness.omp': '透過內附的 Oh My Pi bridge 連線。',
     'connect.harness.pi': '透過 ACP bridge 連線到 PI。',
     'connect.harness.claude': '透過 ACP bridge 連線到 Claude Code。',
     'connect.harness.codex': '透過 ACP bridge 連線到 Codex CLI。',
+    'connect.harness.copilot': '透過 ACP bridge 連線到 GitHub Copilot CLI。',
+    'connect.harness.mimo': '透過 ACP bridge 連線到 MiMo Code。',
     'connect.addressHint': '使用執行 harness 的電腦之區域網路位址。',
     'connect.runOnHost': '在主機上執行',
     'connect.copyCommand': '複製命令',
@@ -1763,6 +1799,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.machines': '機器',
     'sf.refresh': '重新整理',
     'sf.refreshingMachines': '正在重新整理機器',
+    'sf.hideSessionControls': '隱藏工作階段控制項',
+    'sf.showSessionControls': '顯示工作階段控制項',
     'sf.refreshingSessions': '正在重新整理工作階段',
     'sf.machineCount': '{online}/{total} 部機器',
     'sf.connecting': '連線中',
@@ -1802,6 +1840,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.noSessionsOnMachine': '在這部機器上找不到原生工作階段。',
     'sf.attentionCount': '{count} 需注意',
     'sf.liveCount': '{count} 進行中',
+    'sf.readyCount': '{count} 已就緒',
+    'sf.unseenResult': '新結果',
     'sf.offline': '離線',
     'sf.statusWorking': '執行中',
     'sf.statusReady': '就緒',
@@ -2056,7 +2096,10 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.send': '发送',
     'detail.jumpToLatest': '前往最新',
     'detail.you': '👤 你',
-    'detail.opencode': '🤖 OpenCode',
+    'detail.opencode': '🤖 OpenCode Legacy',
+    'detail.opencode2': '🤖 OpenCode 2',
+    'detail.copilot': '🤖 GitHub Copilot CLI',
+    'detail.mimo': '🤖 MiMo Code',
     'detail.projectDashboardLabel': '项目与 VCS 仪表盘',
     'detail.projectLabel': '项目',
     'detail.vcsLabel': 'VCS',
@@ -2148,11 +2191,14 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'connect.step.harness': 'Harness',
     'connect.step.address': '地址',
     'connect.step.credentials': '凭据',
-    'connect.harness.opencode': '直接连接到 OpenCode 服务器。',
+    'connect.harness.opencode': '直接连接到 OpenCode Legacy 服务器。',
+    'connect.harness.opencode2': '通过 ACP 桥接器连接到 OpenCode 2。',
     'connect.harness.omp': '通过附带的 Oh My Pi 桥接器连接。',
     'connect.harness.pi': '通过 ACP 桥接器连接到 PI。',
     'connect.harness.claude': '通过 ACP 桥接器连接到 Claude Code。',
     'connect.harness.codex': '通过 ACP 桥接器连接到 Codex CLI。',
+    'connect.harness.copilot': '通过 ACP 桥接器连接到 GitHub Copilot CLI。',
+    'connect.harness.mimo': '通过 ACP 桥接器连接到 MiMo Code。',
     'connect.addressHint': '请使用运行 harness 的电脑的局域网地址。',
     'connect.runOnHost': '在主机上运行',
     'connect.copyCommand': '复制命令',
@@ -2247,6 +2293,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.machines': '机器',
     'sf.refresh': '刷新',
     'sf.refreshingMachines': '正在刷新机器',
+    'sf.hideSessionControls': '隐藏会话控件',
+    'sf.showSessionControls': '显示会话控件',
     'sf.refreshingSessions': '正在刷新会话',
     'sf.machineCount': '{online}/{total} 台机器',
     'sf.connecting': '连接中',
@@ -2286,6 +2334,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.noSessionsOnMachine': '在该机器上未发现原生会话。',
     'sf.attentionCount': '{count} 需注意',
     'sf.liveCount': '{count} 进行中',
+    'sf.readyCount': '{count} 已就绪',
+    'sf.unseenResult': '新结果',
     'sf.offline': '离线',
     'sf.statusWorking': '执行中',
     'sf.statusReady': '就绪',
