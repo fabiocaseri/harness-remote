@@ -1,8 +1,19 @@
-import { findExecutable } from "./launcher.js"
+import { findExecutable } from "./executable-discovery.js"
 import { createCodexHistoryLoader } from "./codex-session-history.js"
 import { createOmpHistoryLoader } from "./omp-session-history.js"
 import { createPiHistoryLoader } from "./pi-session-history.js"
 import { OMP_EXTENSION_ACTION_PROVIDERS } from "./extension-actions.js"
+import { createAcpProviderRegistry, defineAcpProvider } from "./acp-provider-kit.js"
+import { resolveOpenCodeCommand } from "./opencode-discovery.js"
+import { CopilotModelCatalog } from "./copilot-model-catalog.js"
+
+const COMMON_ACP_LIFECYCLE_CONTRACT = {
+  sessionAuthority: "native-harness",
+  create: "native-session",
+  resume: "native-session-when-supported",
+  stop: "native-abort",
+  reconnect: "daemon-reconciliation"
+}
 
 const COMMON_CAPABILITIES = {
   sessions: true,
@@ -19,10 +30,12 @@ const COMMON_CAPABILITIES = {
 }
 
 export const HARNESS_PROFILES = {
-  omp: {
+  omp: defineAcpProvider({
     id: "omp",
     label: "Oh My Pi",
     command: "omp",
+    detectCommands: ["omp"],
+    launchPriority: 30,
     args: ["acp"],
     permissionMode: "allow",
     historyLoader: createOmpHistoryLoader(),
@@ -45,6 +58,16 @@ export const HARNESS_PROFILES = {
     // OMP exposes thinking as a real ACP config option. We probe only ids the running adapter
     // actually advertises; this list is a routing hint, never a source of invented variants.
     modelVariantConfigIDs: ["thinking"],
+    lifecycleContract: COMMON_ACP_LIFECYCLE_CONTRACT,
+    sessionContract: {
+      authority: "native-harness",
+      discovery: "native-list",
+      transcript: "native-journal",
+      externalWriterObservation: "unverified-via-journal",
+      continuation: "session-load",
+      writerOwnership: "adapter-defined",
+      stop: "owned-session-native-cancel"
+    },
     capabilities: {
       ...COMMON_CAPABILITIES,
       models: true,
@@ -55,8 +78,8 @@ export const HARNESS_PROFILES = {
       sessionDelete: true
     },
     actionProviders: OMP_EXTENSION_ACTION_PROVIDERS
-  },
-  pi: {
+  }),
+  pi: defineAcpProvider({
     id: "pi",
     label: "PI",
     // @automatalabs/pi-acp embeds PI through its published SDK and runs on Node. Version 0.5.0
@@ -66,6 +89,8 @@ export const HARNESS_PROFILES = {
     // explicitly and invoke the binary the package publishes, otherwise npm may try to execute the
     // literal package spec and exit 127 on a real machine.
     command: process.platform === "win32" ? "npx.cmd" : "npx",
+    detectCommands: ["pi"],
+    launchPriority: 40,
     args: ["--yes", "--package=@automatalabs/pi-acp@0.5.0", "pi-acp"],
     adapterCommand: "pi-acp",
     permissionMode: "allow",
@@ -83,6 +108,16 @@ export const HARNESS_PROFILES = {
     // Current PI ACP calls this `thinkingLevel`. The aliases are harmless compatibility hints for
     // adapter versions that rename the wire id; a variant is emitted only when that option exists.
     modelVariantConfigIDs: ["thinkingLevel", "thinking_level", "thinking"],
+    lifecycleContract: COMMON_ACP_LIFECYCLE_CONTRACT,
+    sessionContract: {
+      authority: "native-harness",
+      discovery: "native-list",
+      transcript: "native-journal-authoritative",
+      externalWriterObservation: "supported-via-journal",
+      continuation: "session-load",
+      writerOwnership: "claim-on-session-load",
+      stop: "owned-session-native-cancel"
+    },
     capabilities: {
       ...COMMON_CAPABILITIES,
       models: true,
@@ -92,8 +127,8 @@ export const HARNESS_PROFILES = {
       sessionRename: true,
       sessionDelete: true
     }
-  },
-  claude: {
+  }),
+  claude: defineAcpProvider({
     id: "claude",
     label: "Claude Code",
     // Uses the official ACP adapter for the Claude Agent SDK. The adapter speaks ACP JSON-RPC
@@ -101,6 +136,8 @@ export const HARNESS_PROFILES = {
     // run `claude login` or set ANTHROPIC_API_KEY before starting the bridge.
     // Requires Node 22+ (same as the PI adapter it mirrors).
     command: process.platform === "win32" ? "npx.cmd" : "npx",
+    detectCommands: ["claude"],
+    launchPriority: 20,
     // Pinned to avoid the `notarget` scenario that PI hit. Like PI, install the scoped package
     // explicitly and invoke its published binary instead of relying on npx package-spec inference.
     // 0.63.0 embeds Claude Agent SDK 0.3.220, whose Claude Code core rejects newer advertised
@@ -112,9 +149,23 @@ export const HARNESS_PROFILES = {
     permissionMode: "allow",
     preserveListedTimestamps: true,
     reloadOnHistoryRefresh: false,
+    // session/load replays the complete native transcript, split per Anthropic API message, while
+    // a live turn is recorded as one bridge-owned message. Merging the two kept both copies.
+    replayAuthoritative: true,
+    recoverMissingSessionOnPrompt: true,
     // The current adapter exposes model/mode but no low/medium/high reasoning-effort selector.
     // Keep this empty rather than fabricating OpenCode-style variants.
     modelVariantConfigIDs: [],
+    lifecycleContract: COMMON_ACP_LIFECYCLE_CONTRACT,
+    sessionContract: {
+      authority: "native-harness",
+      discovery: "native-list",
+      transcript: "session-load",
+      externalWriterObservation: "unverified-session-load",
+      continuation: "session-load",
+      writerOwnership: "adapter-defined",
+      stop: "owned-session-native-cancel"
+    },
     capabilities: {
       ...COMMON_CAPABILITIES,
       // The adapter advertises a `model` config option like OMP and PI do; its values are bare ids
@@ -126,8 +177,139 @@ export const HARNESS_PROFILES = {
       sessionRename: true,
       sessionDelete: true
     }
-  },
-  codex: {
+  }),
+  copilot: defineAcpProvider({
+    id: "copilot",
+    // Current Copilot ACP omits model options. Its native SDK transport exposes the live catalog.
+    createModelCatalog: (options) => new CopilotModelCatalog({ ...options, includeAuto: true }),
+    modelCatalogSource: "copilot-sdk-models-list",
+    fallbackModelSelectionMethod: "session/prompt",
+    fallbackModelCommand: "model",
+    replayAuthoritative: true,
+    replayUserChunksAreMessages: true,
+    label: "GitHub Copilot CLI",
+    command: "copilot",
+    detectCommands: ["copilot"],
+    launchPriority: 50,
+    args: ["--acp", "--stdio", ...(process.env.HARNESS_REMOTE_COPILOT_MODEL ? ["--model", process.env.HARNESS_REMOTE_COPILOT_MODEL] : [])],
+    permissionMode: "allow",
+    lifecycleContract: COMMON_ACP_LIFECYCLE_CONTRACT,
+    modelVariantConfigIDs: [],
+    sessionContract: {
+      authority: "native-harness",
+      discovery: "native-list",
+      transcript: "session-load",
+      externalWriterObservation: "unverified-session-load",
+      continuation: "session-load",
+      writerOwnership: "adapter-defined",
+      stop: "owned-session-native-cancel"
+    },
+    capabilities: {
+      ...COMMON_CAPABILITIES,
+      models: true,
+      todos: false,
+      // Copilot ACP advertises its current slash-command set through available_commands_update.
+      commands: true,
+      questions: false,
+      permissions: true,
+      actions: false,
+      sessionRename: false,
+      sessionDelete: false
+    }
+  }),
+  opencode2: defineAcpProvider({
+    id: "opencode2",
+    label: "OpenCode 2",
+    // Both official command names are version-probed before launch. A v1 `opencode` stays on
+    // the legacy HTTP path; explicit v2 selection can fetch this verified release independently.
+    command: process.platform === "win32" ? "npx.cmd" : "npx",
+    detectCommands: ["opencode2", "opencode"],
+    launchPriority: 60,
+    args: ["--yes", "--package=@opencode/cli@2.0.28", "opencode2", "acp"],
+    adapterCommand: "opencode2",
+    adapterArgs: ["acp"],
+    executableGeneration: 2,
+    // V2 session/load replays the complete native transcript. A cached stopped reply can be a
+    // shorter prefix of its durable native text and must not be appended to that replay.
+    replayAuthoritative: true,
+    allowPackageFallback: true,
+    permissionMode: "allow",
+    lifecycleContract: COMMON_ACP_LIFECYCLE_CONTRACT,
+    modelVariantConfigIDs: ["effort"],
+    sessionContract: {
+      authority: "native-harness",
+      discovery: "native-list",
+      transcript: "session-load",
+      externalWriterObservation: "unverified-session-load",
+      continuation: "session-load",
+      writerOwnership: "adapter-defined",
+      stop: "owned-session-native-cancel"
+    },
+    capabilities: {
+      ...COMMON_CAPABILITIES,
+      models: true,
+      todos: false,
+      commands: true,
+      permissions: true,
+      actions: false,
+      sessionRename: false,
+      sessionDelete: false
+    }
+  }),
+  mimo: defineAcpProvider({
+    id: "mimo",
+    label: "MiMo Code",
+    command: "mimo",
+    detectCommands: ["mimo"],
+    launchPriority: 70,
+    args: ["acp"],
+    permissionMode: "allow",
+    // Current MiMo ACP advertises `opencode-login` but its authenticate RPC throws
+    // "Authentication not implemented". It relies on credentials configured in the CLI itself.
+    authenticate: false,
+    environment: {
+      // Every `mimo` start copies new ~/.claude/projects transcripts into MiMo's own Session index,
+      // so each Claude Code Session would reappear in the rail as a MiMo Session with the same turns.
+      MIMOCODE_DISABLE_CLAUDE_IMPORT: "1",
+      // Keep the user's configured provider; the historical hosted MiMo Auto service is retired.
+      ...(process.env.HARNESS_REMOTE_MIMO_CONFIG_CONTENT
+        ? { MIMOCODE_CONFIG_CONTENT: process.env.HARNESS_REMOTE_MIMO_CONFIG_CONTENT }
+        : {})
+    },
+    sessionListScope: "project",
+    // MiMo replays the complete native transcript. Replacing a cached partial transcript is also
+    // required when an idle project process was retired and the Session is opened again.
+    replayAuthoritative: true,
+    refreshSessionListOnRead: false,
+    catalogSessionCleanup: { command: "mimo", args: ["session", "delete"] },
+    excludedModelValuePrefixes: ["mimo/mimo-auto"],
+    inlineModelVariantValues: ["none", "low", "medium", "high", "xhigh"],
+    modelProviderOrder: ["xiaomi", "openai"],
+    requireAssistantResponse: true,
+    lifecycleContract: COMMON_ACP_LIFECYCLE_CONTRACT,
+    // Native model options include reasoning as provider/model/variant wire values.
+    modelVariantConfigIDs: [],
+    sessionContract: {
+      authority: "native-harness",
+      discovery: "native-list",
+      transcript: "session-load",
+      externalWriterObservation: "unverified-session-load",
+      continuation: "session-load",
+      writerOwnership: "adapter-defined",
+      stop: "owned-session-native-cancel"
+    },
+    capabilities: {
+      ...COMMON_CAPABILITIES,
+      models: true,
+      todos: false,
+      commands: false,
+      permissions: true,
+      actions: false,
+      sessionRename: false,
+      sessionDelete: false
+    }
+  }),
+  codex: defineAcpProvider({
     id: "codex",
     label: "Codex CLI",
     // Uses the official ACP adapter for the OpenAI Codex CLI. The adapter speaks ACP JSON-RPC
@@ -135,9 +317,11 @@ export const HARNESS_PROFILES = {
     // user must have run `codex login` (ChatGPT account) or set an OpenAI API key first.
     // Requires Node 22+ (same as the PI and Claude adapters it mirrors).
     command: process.platform === "win32" ? "npx.cmd" : "npx",
+    detectCommands: ["codex"],
+    launchPriority: 10,
     // Pinned to avoid the `notarget` scenario that PI hit. Like PI, install the scoped package
     // explicitly and invoke its published binary instead of relying on npx package-spec inference.
-    args: ["--yes", "--package=@agentclientprotocol/codex-acp@1.1.14", "codex-acp"],
+    args: ["--yes", "--package=@agentclientprotocol/codex-acp@1.13.1", "codex-acp"],
     adapterCommand: "codex-acp",
     permissionMode: "allow",
     // The adapter offers `api-key` before `chat-gpt`; the former demands CODEX_API_KEY or
@@ -151,10 +335,23 @@ export const HARNESS_PROFILES = {
     // bridge does not own, so a conversation still running in Codex keeps updating without asking
     // for the replay that the sessions we do own would otherwise repeat on each refresh.
     historyLoader: createCodexHistoryLoader(),
+    // Rollout byte-offset ids differ from live ACP message ids. Seed an owned Session from its
+    // journal once, then keep the live stream authoritative while this daemon writes it.
+    journalPageWhileOwned: false,
     preserveListedTimestamps: true,
     reloadOnHistoryRefresh: false,
     // The official adapter exposes reasoning effort independently from model selection.
     modelVariantConfigIDs: ["reasoning_effort", "reasoningEffort"],
+    lifecycleContract: COMMON_ACP_LIFECYCLE_CONTRACT,
+    sessionContract: {
+      authority: "native-harness",
+      discovery: "native-list",
+      transcript: "native-journal",
+      externalWriterObservation: "supported-via-journal",
+      continuation: "session-load",
+      writerOwnership: "single-writer",
+      stop: "owned-session-native-cancel"
+    },
     capabilities: {
       ...COMMON_CAPABILITIES,
       // The adapter advertises model ids as bare ids rather than `provider/model`, which is
@@ -167,13 +364,21 @@ export const HARNESS_PROFILES = {
       sessionRename: true,
       sessionDelete: true
     }
-  }
+  })
 }
 
+const ACP_PROVIDER_REGISTRY = createAcpProviderRegistry(Object.values(HARNESS_PROFILES))
+
 export function harnessProfile(id) {
-  const profile = HARNESS_PROFILES[id]
-  if (!profile) throw new Error(`Unsupported backend: ${id}`)
-  return profile
+  return ACP_PROVIDER_REGISTRY.get(id)
+}
+
+export function acpProviderProfile(id) {
+  return ACP_PROVIDER_REGISTRY.get(id)
+}
+
+export function listAcpProviderProfiles() {
+  return ACP_PROVIDER_REGISTRY.list()
 }
 
 /**
@@ -185,9 +390,11 @@ export function harnessProfile(id) {
  * starts without a network round trip, and it sidesteps environments where `npx` cannot link a
  * binary - which is exactly what happens under proot on Android.
  */
-export function resolveAcpLaunch(profile, { find = findExecutable } = {}) {
+export function resolveAcpLaunch(profile, { find = findExecutable, readVersion } = {}) {
   if (!profile.adapterCommand) return { command: profile.command, args: [...profile.args], source: "harness" }
-  const installed = find(profile.adapterCommand)
-  if (installed) return { command: installed, args: [], source: "path" }
+  const installed = profile.executableGeneration
+    ? resolveOpenCodeCommand(profile.executableGeneration, { find, ...(readVersion ? { readVersion } : {}) })
+    : find(profile.adapterCommand)
+  if (installed) return { command: installed, args: [...(profile.adapterArgs ?? [])], source: "path" }
   return { command: profile.command, args: [...profile.args], source: "npx" }
 }
