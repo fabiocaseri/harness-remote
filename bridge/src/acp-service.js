@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
 import path from "node:path"
-import { selectableAcpModelValue } from "./agent-model-catalog.js"
+import { selectableAcpModelValue, modelConfigOptionFromSessionResponse, modelValueIsExcluded, normalizedAcpModelCandidates, splitInlineAcpModelVariant } from "./agent-model-catalog.js"
 import { TranscriptCache } from "./transcript-cache.js"
 import {
   listExtensionActions,
@@ -24,6 +24,13 @@ export function sameDirectory(left, right) {
   }
   return normalize(left) === normalize(right)
 }
+
+function missingAcpSession(error) {
+  if (error?.code === "session_unavailable") return true
+  const message = error instanceof Error ? error.message : String(error ?? "")
+  return /\bsession\b.{0,180}\b(not found|unknown|unavailable|does not exist|no longer exists)\b/i.test(message)
+}
+
 function sessionView(session, status = "idle", title = session.title, external = false) {
   return {
     id: session.sessionId,
@@ -81,6 +88,60 @@ function messageSignature(message) {
   // Visible text + terminal error is the stable identity across those two representations.
   const error = message?.info?.error?.message ? `\u0000${message.info.error.message}` : ""
   return `${message?.info?.role ?? ""}\u0000${visibleMessageText(message)}${error}`
+}
+
+/**
+ * Keep replayed creation times in transcript order.
+ *
+ * A replay mixes two clocks: messages this bridge already knew keep their recorded time, while
+ * the ones ACP replays without a timestamp are stamped with the moment of the reload. Clients order
+ * turns by that time, so a user-role message first seen on replay — Claude Code's interruption
+ * marker, written mid-turn and never streamed live — moved past every later prompt and appeared at
+ * the bottom of a Session that had finished normally. Walking backward, a message may not claim the
+ * time of the message after it or a later one; known times are never moved forward. A moved time is
+ * strictly earlier, because clients break equal times by id, which says nothing about order.
+ */
+export function chronologicalReplay(messages) {
+  let ceiling = Number.POSITIVE_INFINITY
+  const ordered = new Array(messages.length)
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    const created = Number(message?.info?.time?.created)
+    if (!Number.isFinite(created) || created <= 0) {
+      ordered[index] = message
+      continue
+    }
+    if (created >= ceiling) {
+      ceiling -= 1
+      ordered[index] = { ...message, info: { ...message.info, time: { ...message.info.time, created: ceiling } } }
+      continue
+    }
+    ordered[index] = message
+    ceiling = created
+  }
+  return ordered
+}
+
+function authoritativeReplay(previous, replayed) {
+  // ACP replay can omit timestamps and mint fresh ids. Retain known identities for unchanged
+  // occurrences, while the native replay alone decides content, membership and order.
+  const priorBySignature = new Map()
+  for (const message of previous) {
+    const signature = messageSignature(message)
+    const matches = priorBySignature.get(signature) ?? []
+    matches.push(message)
+    priorBySignature.set(signature, matches)
+  }
+  return replayed.map((message) => {
+    const prior = priorBySignature.get(messageSignature(message))?.shift()
+    if (!prior) return message
+    return {
+      ...message,
+      // A live Stop is recorded only here; a harness that journals no interruption must not erase it.
+      info: { ...message.info, id: prior.info.id, time: prior.info.time, ...(prior.info.interrupted ? { interrupted: true } : {}) },
+      parts: message.parts.map((part) => ({ ...part, ...(part.messageID ? { messageID: prior.info.id } : {}) }))
+    }
+  })
 }
 
 function isConsecutiveAssistantDuplicate(previous, next) {
@@ -337,6 +398,38 @@ export function isHarnessInjectedText(text) {
   return HARNESS_INJECTED_BLOCK.test(text)
 }
 
+/**
+ * Claude Code records a cancelled turn as a plain user-role marker: for a Stop, and for a message
+ * sent while a turn was running. Shown as is, it reads as text the user typed. It is a fact about the
+ * turn before it, so the transcript carries it as `info.interrupted` on that turn's reply instead -
+ * the same flag a live Stop and the OMP/PI journal aborts produce. Matched exactly, so a message that
+ * quotes the marker stays an ordinary message.
+ */
+const INTERRUPTION_MARKER = /^\s*\[Request interrupted by user(?: for tool use)?\]\s*$/
+
+export function isInterruptionMarker(text) {
+  return INTERRUPTION_MARKER.test(text)
+}
+
+/** Flag the reply of the newest turn as interrupted, adding an empty reply when it had none yet. */
+export function markLatestTurnInterrupted(messages, sessionID, created = Date.now()) {
+  let lastUser = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.info?.role === "user") {
+      lastUser = index
+      break
+    }
+  }
+  if (lastUser < 0) return false
+  for (let index = messages.length - 1; index > lastUser; index -= 1) {
+    if (messages[index]?.info?.role !== "assistant") continue
+    messages[index] = { ...messages[index], info: { ...messages[index].info, interrupted: true } }
+    return true
+  }
+  messages.push({ info: { id: randomUUID(), role: "assistant", sessionID, time: { created }, interrupted: true }, parts: [] })
+  return true
+}
+
 /** The two tool-call states that mean "still running" on the wire and in the transcript. */
 const UNSETTLED_TOOL_STATUSES = new Set(["pending", "running"])
 
@@ -423,6 +516,7 @@ export class AcpService {
   })
   #todos = new Map()
   #configOptions = new Map()
+  #modelSwitchMethods = new Map()
   #commandCatalogs = new Map()
   #commandCatalogWaiters = new Map()
   #actionStates = new Map()
@@ -438,6 +532,9 @@ export class AcpService {
   #acpOpenSessions = new Set()
   #promptAcknowledgements = new Map()
   #titles = new Map()
+  #titleIndexLoaded = false
+  #titleIndexLoading
+  #titleIndexWrite = Promise.resolve()
   #deletedSessions = new Set()
   #deletedSessionIndexLoaded = false
   #deletedSessionIndexWrite = Promise.resolve()
@@ -452,7 +549,7 @@ export class AcpService {
   // has flushed its terminal assistant error. These ids keep only that short-lived bridge copy alive.
   #transientFailureMessageIDs = new Map()
   #snapshotDirectory
-  #restoredSnapshots = new Set()
+  #restoredSnapshots = new Map()
   #dirtySnapshots = new Set()
   #dirtyStart = new Map()
   #snapshotWrites = new Map()
@@ -464,7 +561,23 @@ export class AcpService {
   #preferListedTitles
   #nativeRenameCommand
   #journalPageWhileOwned
+  #replayAuthoritative
+  #replayUserChunksAreMessages
+  #refreshSessionListOnRead
   #modelVariantConfigIDs
+  #modelProviderID
+  #excludedModelValuePrefixes
+  #inlineModelVariantValues
+  #modelProviderOrder
+  #requireAssistantResponse
+  #requireExistingDirectory
+  #recoverMissingSessionOnPrompt
+  #turnResponseObserved = new Set()
+  #fallbackModelCatalog
+  #fallbackModelSelectionMethod
+  #fallbackModelCommand
+  #modelCommandReplies = new Map()
+  #fallbackModelSelections = new Map()
   constructor(acp, {
     snapshotDirectory,
     historyLoader,
@@ -490,12 +603,28 @@ export class AcpService {
      * replies - which is what made a second turn look blank until the conversation was reopened.
      */
     journalPageWhileOwned = true,
+    /** A complete native ACP replay replaces cached partial turns rather than merging them. */
+    replayAuthoritative = false,
+    /** Copilot 1.0.97 replays one complete user message per notification, without message ids. */
+    replayUserChunksAreMessages = false,
+    /** Project-scoped indexes are paged separately; reads can use Sessions already observed there. */
+    refreshSessionListOnRead = true,
     /**
      * Config-option ids this harness uses for the reasoning variant that belongs to a model.
      * Only used to report the Session's current selection; a variant is still applied against an
      * id the running adapter actually advertised.
      */
     modelVariantConfigIDs = [],
+    modelProviderID,
+    excludedModelValuePrefixes = [],
+    inlineModelVariantValues = [],
+    modelProviderOrder = [],
+    requireAssistantResponse = false,
+    requireExistingDirectory = false,
+    recoverMissingSessionOnPrompt = false,
+    fallbackModelCatalog,
+    fallbackModelSelectionMethod,
+    fallbackModelCommand,
     actionProviders = []
   } = {}) {
     this.#acp = acp
@@ -508,9 +637,35 @@ export class AcpService {
     this.#preferListedTitles = preferListedTitles
     this.#nativeRenameCommand = nativeRenameCommand
     this.#journalPageWhileOwned = journalPageWhileOwned
+    this.#replayAuthoritative = replayAuthoritative
+    this.#replayUserChunksAreMessages = replayUserChunksAreMessages
+    this.#refreshSessionListOnRead = refreshSessionListOnRead
     this.#modelVariantConfigIDs = modelVariantConfigIDs
+    this.#modelProviderID = modelProviderID
+    this.#excludedModelValuePrefixes = excludedModelValuePrefixes
+    this.#inlineModelVariantValues = inlineModelVariantValues
+    this.#modelProviderOrder = modelProviderOrder
+    this.#requireAssistantResponse = requireAssistantResponse
+    this.#requireExistingDirectory = requireExistingDirectory
+    this.#recoverMissingSessionOnPrompt = recoverMissingSessionOnPrompt
+    this.#fallbackModelCatalog = fallbackModelCatalog
+    this.#fallbackModelSelectionMethod = fallbackModelSelectionMethod
+    this.#fallbackModelCommand = fallbackModelCommand
     this.#actionProviders = actionProviders
     acp.on("notification", (notification) => this.#handleNotification(notification))
+    acp.on("sessions-closed", (sessionIDs) => this.#forgetOpenSessions(sessionIDs))
+    // An adapter that exits takes every Session it had open with it. Still counting them as loaded
+    // sent the next prompt to a process that had never seen the Session, and the reload that its
+    // "Session not found" then forced ran in the middle of that turn.
+    acp.on?.("exit", () => this.#forgetOpenSessions([...this.#acpOpenSessions, ...this.#loaded]))
+  }
+
+  #forgetOpenSessions(sessionIDs) {
+    for (const sessionID of sessionIDs) {
+      this.#loaded.delete(sessionID)
+      this.#acpOpenSessions.delete(sessionID)
+      this.#configOptions.delete(sessionID)
+    }
   }
 
   subscribe(listener) {
@@ -534,6 +689,7 @@ export class AcpService {
 
   async listSessions(directory) {
     await this.#restoreDeletedSessionIndex()
+    await this.#restoreTitleIndex()
     const sessions = await this.#refreshSessions()
     await Promise.all(sessions.map((session) => this.#restoreSnapshot(session.sessionId)))
     return sessions
@@ -593,10 +749,11 @@ export class AcpService {
   }
 
   async createSession({ directory, title, model }) {
+    await this.#restoreTitleIndex()
     await this.#acp.start()
     const result = await this.#acp.request("session/new", { cwd: directory, mcpServers: [] })
     this.#acpOpenSessions.add(result.sessionId)
-    this.#rememberConfigOptions(result.sessionId, result.configOptions)
+    this.#rememberSessionConfiguration(result.sessionId, result)
     const session = {
       sessionId: result.sessionId,
       cwd: directory,
@@ -614,6 +771,7 @@ export class AcpService {
     if (title) {
       this.#titles.set(session.sessionId, title)
       await this.#applyNativeSessionName(session.sessionId, title)
+      await this.#persistTitleIndex()
     }
     if (model) await this.setModel(session.sessionId, model)
     this.#emit("session.created", session.sessionId)
@@ -671,6 +829,7 @@ export class AcpService {
   }
 
   async renameSession(sessionID, title) {
+    await this.#restoreTitleIndex()
     const normalized = title.trim().replace(/\s+/g, " ")
     if (!normalized) throw new Error("A session title is required")
     await this.#requireSession(sessionID)
@@ -690,6 +849,7 @@ export class AcpService {
       this.#actionStates.delete(sessionID)
       this.#authoritativeActionStates.delete(sessionID)
       this.#titles.delete(sessionID)
+      await this.#persistTitleIndex()
       await this.#refreshSessions()
       const session = this.#sessions.get(sessionID)
       if (!session) throw new Error("Harness session not found after rename")
@@ -706,6 +866,7 @@ export class AcpService {
     if (await this.#nativeRenameAvailable(sessionID)) {
       await this.#sendNativeSessionName(sessionID, normalized)
       this.#titles.delete(sessionID)
+      await this.#persistTitleIndex()
       await this.#refreshSessions()
       const session = this.#sessions.get(sessionID)
       if (!session) throw new Error("Harness session not found after rename")
@@ -720,6 +881,7 @@ export class AcpService {
     }
 
     this.#titles.set(sessionID, normalized)
+    await this.#persistTitleIndex()
     this.#persistSnapshot(sessionID)
     this.#emit("session.updated", sessionID)
     return sessionView(
@@ -787,6 +949,7 @@ export class AcpService {
       if (!await this.#nativeRenameAvailable(sessionID)) return
       await this.#sendNativeSessionName(sessionID, title)
       this.#titles.delete(sessionID)
+      await this.#persistTitleIndex()
       await this.#refreshSessions()
     } catch {
       this.#titles.set(sessionID, title)
@@ -794,6 +957,7 @@ export class AcpService {
   }
 
   async deleteSession(sessionID) {
+    await this.#restoreTitleIndex()
     // A Session deleted by a pre-index Harness Remote may already carry deleted:true only in its
     // per-Session snapshot. Restoring that snapshot must migrate the tombstone into the lightweight
     // deletion index instead of failing before the index can be written. This keeps DELETE
@@ -813,6 +977,7 @@ export class AcpService {
     this.#messages.delete(sessionID)
     this.#todos.delete(sessionID)
     this.#titles.delete(sessionID)
+    await this.#persistTitleIndex()
     this.#configOptions.delete(sessionID)
     this.#commandCatalogs.delete(sessionID)
     for (const resolve of this.#commandCatalogWaiters.get(sessionID) ?? []) resolve()
@@ -840,7 +1005,7 @@ export class AcpService {
   }
 
   async messages(sessionID, refresh = false) {
-    await this.#refreshSessions()
+    if (this.#refreshSessionListOnRead || !this.#sessions.has(sessionID)) await this.#refreshSessions()
     await this.#restoreSnapshot(sessionID)
     if (this.#historyLoader?.authoritativeHistory) {
       try {
@@ -869,8 +1034,12 @@ export class AcpService {
           cachedMessages,
           this.#transientFailureMessageIDs.get(sessionID)
         )
+        // A live PI turn already has a complete history seed plus its ACP stream. Its journal can
+        // publish the final answer before the remaining ACP chunks drain, under different ids.
+        // Unioning those sources makes both a partial and complete answer visible and can append
+        // later deltas onto the journal copy. Keep the stream alone until this turn settles.
         const messages = this.#isBusy(sessionID)
-          ? mergeFragmentedPiSnapshot(mergeExternalHistory(persistedMessages, cachedMessages))
+          ? cachedMessages
           // Idle normally means "journal only". The one exception is a live provider failure the
           // journal has not flushed yet; keep that exact failed turn until the persisted copy exists.
           : pendingFailureTurn.length
@@ -955,20 +1124,25 @@ export class AcpService {
    * provider reports nothing here rather than inventing one.
    */
   #configuredModelSelection(sessionID) {
-    if (this.#journalPageWhileOwned) return undefined
+    // A native journal, when present and used for paging, supplies its own model authority.
+    // Journal-less ACP providers such as OpenCode 2 must expose session/load's config model.
+    if (this.#historyLoader && this.#journalPageWhileOwned) return undefined
     const options = this.#configOptions.get(sessionID)
-    const current = options?.find((item) => item.id === "model")?.currentValue
-    if (typeof current !== "string") return undefined
+    const option = options?.find((item) => item.id === "model")
+    const wireValue = option?.currentValue
+    const inline = splitInlineAcpModelVariant(wireValue, option, this.#inlineModelVariantValues)
+    const current = inline?.modelValue ?? wireValue
+    if (typeof current !== "string") return this.#fallbackModelSelections.get(sessionID)
     const separator = current.indexOf("/")
-    if (separator <= 0 || separator === current.length - 1) return undefined
+    if (separator <= 0 && !this.#modelProviderID || separator === current.length - 1) return undefined
     // The reasoning variant belongs to the selection: reporting the model without it would let the
     // app carry the next turn on with the variant silently dropped.
-    const variant = this.#modelVariantConfigIDs
+    const variant = inline?.variant ?? this.#modelVariantConfigIDs
       .map((configId) => options?.find((item) => item.id === configId)?.currentValue)
       .find((value) => typeof value === "string" && value)
     return {
-      providerID: current.slice(0, separator),
-      modelID: current.slice(separator + 1),
+      providerID: separator > 0 ? current.slice(0, separator) : this.#modelProviderID,
+      modelID: separator > 0 ? current.slice(separator + 1) : current,
       ...(variant ? { variant } : {})
     }
   }
@@ -985,7 +1159,7 @@ export class AcpService {
   }
 
   async todos(sessionID) {
-    await this.#refreshSessions()
+    if (this.#refreshSessionListOnRead || !this.#sessions.has(sessionID)) await this.#refreshSessions()
     await this.#restoreSnapshot(sessionID)
     if (this.#historyLoader && !this.#ownedSessions.has(sessionID)) return []
     await this.#load(sessionID)
@@ -995,7 +1169,12 @@ export class AcpService {
   async models(sessionID) {
     await this.#loadForConfigOptions(sessionID)
     const option = this.#configOptions.get(sessionID)?.find((item) => item.id === "model")
-    return option?.options?.map((candidate) => ({ ...candidate, currentValue: candidate.value === option.currentValue })) ?? []
+    if (!option && this.#fallbackModelCatalog) {
+      const selected = this.#fallbackModelSelections.get(sessionID)
+      const result = await this.#fallbackModelCatalog.list({ allowStale: false })
+      return result.models.map((model) => ({ ...model, value: model.modelID, name: model.modelName, currentValue: selected?.modelID === model.modelID }))
+    }
+    return normalizedAcpModelCandidates(option, this.#excludedModelValuePrefixes, this.#inlineModelVariantValues, this.#modelProviderOrder)
   }
 
   async actions(sessionID) {
@@ -1139,8 +1318,47 @@ export class AcpService {
    * against a Session whose options have not been loaded yet.
    */
   async setModel(sessionID, model, variant) {
+    return this.#withNativeSession(sessionID, () => this.#applyModel(sessionID, model, variant))
+  }
+
+  async #applyModel(sessionID, model, variant) {
     await this.#loadForConfigOptions(sessionID)
     const option = this.#configOptions.get(sessionID)?.find((item) => item.id === "model")
+    if (!option && this.#fallbackModelCatalog && this.#fallbackModelSelectionMethod) {
+      if (variant?.value) throw new Error("This harness does not advertise per-session model variants")
+      const prefix = `${this.#modelProviderID}/`
+      const modelID = model.startsWith(prefix) ? model.slice(prefix.length) : model
+      const resolved = await this.#fallbackModelCatalog.resolve({ providerID: this.#modelProviderID, modelID })
+      if (this.#fallbackModelCommand) {
+        if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(resolved.modelID)) throw new Error("Invalid native model identifier")
+        const commands = await this.commands(sessionID)
+        if (!commands.some((command) => command.name === this.#fallbackModelCommand)) {
+          throw new Error("The harness does not advertise its native model-selection command")
+        }
+        const reply = { chunks: [], configurationUpdated: false }
+        this.#modelCommandReplies.set(sessionID, reply)
+        try {
+          const result = await this.#acp.request("session/prompt", {
+            sessionId: sessionID,
+            prompt: [{ type: "text", text: `/${this.#fallbackModelCommand} ${resolved.modelID}` }]
+          })
+          const text = reply.chunks.join("").trim()
+          // Copilot sends an acknowledgement when changing models. An already selected model
+          // produces only config_option_update and end_turn, as observed with CLI 1.0.97.
+          const unchanged = !text && reply.configurationUpdated && result?.stopReason === "end_turn"
+          if (!/Model changed to:/i.test(text) && !unchanged) throw new Error(text || "The harness did not confirm the selected model")
+        } finally {
+          this.#modelCommandReplies.delete(sessionID)
+        }
+      } else {
+        await this.#acp.request(this.#fallbackModelSelectionMethod, { sessionId: sessionID, modelId: resolved.modelID })
+      }
+      // This is the last choice explicitly made in Harness Remote. Apply it again before each
+      // continuation because this ACP server does not report its native current model.
+      this.#fallbackModelSelections.set(sessionID, { providerID: resolved.providerID, modelID: resolved.modelID })
+      this.#persistSnapshot(sessionID)
+      return
+    }
     // The app addresses models as `provider/model` because that is what OpenCode's API does, but a
     // harness whose ids carry no provider — Claude Code's `sonnet`, `opus[1m]` — is shown under the
     // backend's name to keep it consistent. Resolve against what the agent actually offered rather
@@ -1148,27 +1366,46 @@ export class AcpService {
     const separator = model.indexOf("/")
     const providerID = separator > 0 ? model.slice(0, separator) : ""
     const modelID = separator > 0 ? model.slice(separator + 1) : model
-    const value = option?.options?.find((candidate) => candidate.value === model)?.value
+    let value = option?.options?.find((candidate) => candidate.value === model)?.value
       ?? option?.options?.find((candidate) => candidate.value === modelID)?.value
       ?? option?.options?.find((candidate) => selectableAcpModelValue(candidate.value, option, providerID) === modelID)?.value
     if (!value) throw new Error(`Harness model is not available: ${model}`)
+    if (modelValueIsExcluded(value, this.#excludedModelValuePrefixes)) {
+      const error = new Error(`Harness model is unavailable: ${model}`)
+      error.code = "model_unavailable"
+      throw error
+    }
+    const inlineVariant = variant?.configId === "model" && this.#inlineModelVariantValues.length > 0
+    if (inlineVariant) {
+      const candidate = option.options.find((item) => item.value === variant.value || item.value === `${value}/${variant.value}`)
+      const selected = splitInlineAcpModelVariant(candidate?.value, option, this.#inlineModelVariantValues)
+      if (!selected || selected.modelValue !== value) {
+        const error = new Error(`Harness model variant is not available: ${variant.value}`)
+        error.code = "model_variant_unavailable"
+        throw error
+      }
+      value = selected.variantValue
+    }
     // Continuing on the model the Session already holds is not a model change. Sending it anyway
     // made every prompt mutate the Session's configuration, which a harness is entitled to journal
     // and to announce - so simply carrying on read as though the user had switched models.
     if (option?.currentValue === value) {
-      await this.#setModelVariant(sessionID, variant)
+      if (!inlineVariant) await this.#setModelVariant(sessionID, variant)
       return
     }
-    const changed = await this.#acp.request("session/set_config_option", { sessionId: sessionID, configId: "model", value })
+    const method = this.#modelSwitchMethods.get(sessionID) ?? "session/set_config_option"
+    const changed = await this.#acp.request(method, method === "session/set_model"
+      ? { sessionId: sessionID, modelId: value }
+      : { sessionId: sessionID, configId: "model", value })
     // Adopt the options the adapter reports for the model it now holds. A harness whose dependent
     // controls differ per model - PI advertises a different thinkingLevel range for each one, from a
     // single `off` up to `max` - otherwise leaves this Session describing the previous model, so the
     // variant about to be applied would be checked against the wrong set of values.
-    if (Array.isArray(changed?.configOptions)) this.#rememberConfigOptions(sessionID, changed.configOptions)
+    this.#rememberSessionConfiguration(sessionID, changed)
     const current = this.#configOptions.get(sessionID)?.find((item) => item.id === "model")
     if (current) current.currentValue = value
     else option.currentValue = value
-    await this.#setModelVariant(sessionID, variant)
+    if (!inlineVariant) await this.#setModelVariant(sessionID, variant)
   }
 
   /**
@@ -1200,6 +1437,16 @@ export class AcpService {
    * is what makes it visible in the conversation while it waits.
    */
   async prompt(sessionID, text, model, attachments = [], variant) {
+    return this.#withNativeSession(sessionID, () => this.#prompt(sessionID, text, model, attachments, variant))
+  }
+
+  async #withNativeSession(sessionID, operation) {
+    if (typeof this.#acp.withSession !== "function") return operation()
+    if (!this.#sessions.has(sessionID)) await this.#refreshSessions()
+    return this.#acp.withSession(sessionID, this.#sessions.get(sessionID)?.cwd, operation)
+  }
+
+  async #prompt(sessionID, text, model, attachments, variant) {
     // Refuse before touching the session: an agent that never advertised image support
     // would reject the block mid-turn, which reads as a failed prompt rather than a
     // rejected attachment.
@@ -1218,6 +1465,7 @@ export class AcpService {
     } else {
       await this.#load(sessionID)
     }
+    await this.#requireSessionDirectory(this.#sessions.get(sessionID))
     this.#resetActionsForSessionChange(sessionID)
     if (this.#active.has(sessionID)) {
       const messageID = this.#recordPrompt(sessionID, text, attachments)
@@ -1227,7 +1475,9 @@ export class AcpService {
       this.#emit("session.updated", sessionID)
       return
     }
-    if (model) await this.setModel(sessionID, model, variant)
+    const savedModel = this.#fallbackModelSelections.get(sessionID)
+    const selection = model ?? (savedModel ? `${savedModel.providerID}/${savedModel.modelID}` : undefined)
+    if (selection) await this.setModel(sessionID, selection, variant)
     this.#startTurn(sessionID, text, false, attachments)
   }
 
@@ -1265,17 +1515,26 @@ export class AcpService {
     this.#turnGenerations.set(sessionID, generation)
     this.#cancelledSessions.delete(sessionID)
     this.#promptedSessions.add(sessionID)
+    this.#turnResponseObserved.delete(sessionID)
     if (!recorded) this.#recordPrompt(sessionID, text, attachments)
     this.#active.add(sessionID)
     this.#chunkMessageIDs.delete(`${sessionID}:assistant`)
     this.#emit("session.updated", sessionID)
-    void this.#acp.request("session/prompt", {
+    void this.#requestPromptWithRecovery(sessionID, {
       sessionId: sessionID,
       prompt: [
         ...(text ? [{ type: "text", text }] : []),
         ...attachments.map((attachment) => ({ type: "image", mimeType: attachment.mime, data: attachment.data }))
       ]
-    }, 300_000).catch((error) => {
+    }).then(async (result) => {
+      if (this.#requireAssistantResponse && !this.#turnResponseObserved.has(sessionID)) {
+        await new Promise((resolve) => setTimeout(resolve, this.#promptSettleMs || 50))
+      }
+      if (this.#requireAssistantResponse && this.#turnGenerations.get(sessionID) === generation
+        && result?.stopReason === "end_turn" && !this.#turnResponseObserved.has(sessionID)) {
+        throw new Error("The harness completed the turn without an assistant response. Check that the selected model and provider are available.")
+      }
+    }).catch((error) => {
       if (this.#turnGenerations.get(sessionID) === generation) {
         this.#recordTurnFailure(sessionID, error.message)
         this.#emit("session.error", sessionID, { message: error.message })
@@ -1290,6 +1549,7 @@ export class AcpService {
       }
       if (this.#turnGenerations.get(sessionID) !== generation) return
       this.#active.delete(sessionID)
+      this.#turnResponseObserved.delete(sessionID)
       // Older adapters intentionally deliver assistant chunks after their RPC response, so their
       // historical zero-drain behavior must stay permissive. PI opts into a real drain window above;
       // once it closes, an even later chunk belongs to a subsequent native lifecycle, not this turn.
@@ -1301,6 +1561,29 @@ export class AcpService {
       this.#persistSnapshot(sessionID)
       void this.#runNextQueued(sessionID)
     })
+  }
+
+  async #requestPromptWithRecovery(sessionID, params) {
+    try {
+      return await this.#acp.request("session/prompt", params, 300_000)
+    } catch (error) {
+      if (!this.#recoverMissingSessionOnPrompt || !missingAcpSession(error)) throw error
+      // The replay below rebuilds the transcript from what the harness stored, which does not yet
+      // include this turn's prompt: the adapter refused it. Keep the turn as recorded, and start its
+      // reply in a message of its own rather than in the last one the replay produced.
+      const messages = this.#messages.get(sessionID) ?? []
+      const promptIndex = messages.findLastIndex((message) => message.info.role === "user")
+      const turn = promptIndex >= 0 ? messages.slice(promptIndex) : []
+      this.#forgetOpenSessions([sessionID])
+      await this.#load(sessionID, true)
+      const replayed = this.#messages.get(sessionID) ?? []
+      const replayedIDs = new Set(replayed.map((message) => message.info.id))
+      this.#messages.set(sessionID, [...replayed, ...turn.filter((message) => !replayedIDs.has(message.info.id))])
+      this.#chunkMessageIDs.delete(`${sessionID}:user`)
+      this.#chunkMessageIDs.delete(`${sessionID}:assistant`)
+      this.#emit("message.updated", sessionID)
+      return this.#acp.request("session/prompt", params, 300_000)
+    }
   }
 
   /**
@@ -1339,9 +1622,11 @@ export class AcpService {
     if (!queue.length) this.#queues.delete(sessionID)
     // The model is applied on dequeue: doing it on enqueue would switch the model
     // underneath the turn that was still running.
-    if (next.model) {
+    const savedModel = this.#fallbackModelSelections.get(sessionID)
+    const selection = next.model ?? (savedModel ? `${savedModel.providerID}/${savedModel.modelID}` : undefined)
+    if (selection) {
       try {
-        await this.setModel(sessionID, next.model, next.variant)
+        await this.setModel(sessionID, selection, next.variant)
       } catch (error) {
         // The queued user prompt was already recorded when it was enqueued. A model switch refusal
         // terminates that turn; never run it on the previous model after telling the client it failed.
@@ -1371,12 +1656,20 @@ export class AcpService {
       }
       this.#emit("message.updated", sessionID)
     }
+    const wasActive = this.#active.has(sessionID)
     this.#turnGenerations.set(sessionID, (this.#turnGenerations.get(sessionID) ?? 0) + 1)
     this.#cancelledSessions.add(sessionID)
+    this.#turnResponseObserved.delete(sessionID)
     this.#active.delete(sessionID)
     this.#chunkMessageIDs.delete(`${sessionID}:assistant`)
     // A cancelled turn gets no closing tool_call_update at all, so settle before it is published.
     this.#settleActivity(sessionID)
+    // Live, the Stop is the only record of the interruption; replay reads it back from the harness.
+    if (wasActive) {
+      const messages = this.#messages.get(sessionID) ?? []
+      this.#messages.set(sessionID, messages)
+      if (markLatestTurnInterrupted(messages, sessionID)) this.#emit("message.updated", sessionID)
+    }
     this.#acp.notify("session/cancel", { sessionId: sessionID })
     this.#emit("session.updated", sessionID)
     this.#persistSnapshot(sessionID)
@@ -1391,6 +1684,7 @@ export class AcpService {
       await Promise.all(this.#snapshotWrites.values())
     }
     await this.#deletedSessionIndexWrite
+    await this.#titleIndexWrite
   }
 
   /**
@@ -1403,6 +1697,55 @@ export class AcpService {
   async deletedSessionIDs() {
     await this.#restoreDeletedSessionIndex()
     return new Set(this.#deletedSessions)
+  }
+
+  /** Persistent bridge-local names for lightweight index reads. */
+  async titleOverrides() {
+    await this.#restoreTitleIndex()
+    return new Map(this.#titles)
+  }
+
+  #titleIndexPath() {
+    return path.join(this.#snapshotDirectory, "session-titles.json")
+  }
+
+  async #restoreTitleIndex() {
+    if (this.#titleIndexLoading) return this.#titleIndexLoading
+    if (!this.#snapshotDirectory || this.#titleIndexLoaded) return
+    const loading = this.#readTitleIndex()
+    this.#titleIndexLoading = loading
+    try { await loading } finally { this.#titleIndexLoading = undefined }
+  }
+
+  async #readTitleIndex() {
+    this.#titleIndexLoaded = true
+    try {
+      const state = JSON.parse(await readFile(this.#titleIndexPath(), "utf8"))
+      if (state?.version !== 1 || !state.titles || typeof state.titles !== "object" || Array.isArray(state.titles)) return
+      for (const [sessionID, title] of Object.entries(state.titles)) {
+        if (sessionID && typeof title === "string" && title) this.#titles.set(sessionID, title)
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        this.#titleIndexLoaded = false
+        throw error
+      }
+    }
+  }
+
+  async #persistTitleIndex() {
+    if (!this.#snapshotDirectory) return
+    const previous = this.#titleIndexWrite
+    const writing = previous.catch(() => undefined).then(async () => {
+      await mkdir(this.#snapshotDirectory, { recursive: true })
+      const target = this.#titleIndexPath()
+      const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`
+      const titles = Object.fromEntries([...this.#titles.entries()].sort(([left], [right]) => left.localeCompare(right)))
+      await writeFile(temporary, JSON.stringify({ version: 1, titles }), { mode: 0o600 })
+      await rename(temporary, target)
+    })
+    this.#titleIndexWrite = writing
+    await writing
   }
 
   #deletedSessionIndexPath() {
@@ -1449,17 +1792,35 @@ export class AcpService {
     return path.join(this.#snapshotDirectory, `${name}.json`)
   }
 
-  async #restoreSnapshot(sessionID) {
-    if (!this.#snapshotDirectory || this.#restoredSnapshots.has(sessionID)) return
-    this.#restoredSnapshots.add(sessionID)
+  /**
+   * Every caller waits for the same read. At startup the Session list reads every snapshot at once,
+   * so a long Session's file can still be in flight when that Session is opened; returning early
+   * there let the load clear the transcript and start its replay, and the read then landed on top
+   * of it. The rest of the replay was merged into the old transcript: its text doubled onto the
+   * messages it already had, and the turns that open with a tool call piled up at the end as one
+   * Activity with no reply.
+   */
+  #restoreSnapshot(sessionID) {
+    if (!this.#snapshotDirectory) return Promise.resolve()
+    let restoring = this.#restoredSnapshots.get(sessionID)
+    if (!restoring) {
+      restoring = this.#readSnapshot(sessionID)
+      this.#restoredSnapshots.set(sessionID, restoring)
+    }
+    return restoring
+  }
+
+  async #readSnapshot(sessionID) {
+    await this.#restoreTitleIndex()
     try {
       const snapshot = JSON.parse(await readFile(this.#snapshotPath(sessionID), "utf8"))
       if (snapshot?.version !== 1) return
       // A freshly created Session is already loaded in this process. Its first snapshot can still
       // contain the empty pre-prompt transcript while a real prompt has since been recorded in
       // memory; restoring that stale file here would erase the visible user turn. Snapshots only
-      // seed a Session that has not been loaded yet (restart or cache eviction).
-      if (!this.#loaded.has(sessionID) && Array.isArray(snapshot.messages)) {
+      // seed a Session that has not been loaded yet (restart or cache eviction), and never one
+      // whose replay is already rebuilding it.
+      if (!this.#loaded.has(sessionID) && !this.#replaying.has(sessionID) && Array.isArray(snapshot.messages)) {
         const fragmented = mergeFragmentedPiSnapshot(snapshot.messages)
         const restored = healPoisonedSnapshot(fragmented)
         if (restored.length !== fragmented.length) {
@@ -1476,7 +1837,11 @@ export class AcpService {
         this.#messages.set(sessionID, restored)
       }
       if (Array.isArray(snapshot.todos)) this.#todos.set(sessionID, snapshot.todos)
-      if (!this.#preferListedTitles && typeof snapshot.title === "string" && snapshot.title) this.#titles.set(sessionID, snapshot.title)
+      if (this.#fallbackModelCatalog && typeof snapshot.selectedModel?.modelID === "string"
+        && snapshot.selectedModel.providerID === this.#modelProviderID) {
+        this.#fallbackModelSelections.set(sessionID, snapshot.selectedModel)
+      }
+      if (!this.#preferListedTitles && !this.#titles.has(sessionID) && typeof snapshot.title === "string" && snapshot.title) this.#titles.set(sessionID, snapshot.title)
       if (snapshot?.deleted === true) this.#deletedSessions.add(sessionID)
     } catch (error) {
       if (error?.code !== "ENOENT") this.#emit("session.error", sessionID, { message: "Stored session snapshot is unreadable" })
@@ -1521,6 +1886,7 @@ export class AcpService {
           messages: journalOwnsTranscript ? [] : healedMessages,
           todos: this.#todos.get(sessionID) ?? [],
           title: this.#titleFor(sessionID),
+          ...(this.#fallbackModelCatalog ? { selectedModel: this.#fallbackModelSelections.get(sessionID) } : {}),
           deleted: this.#deletedSessions.has(sessionID)
         })
         const target = this.#snapshotPath(sessionID)
@@ -1594,7 +1960,7 @@ export class AcpService {
 
   async #requireSession(sessionID) {
     await this.#restoreDeletedSessionIndex()
-    await this.#refreshSessions()
+    if (this.#refreshSessionListOnRead || !this.#sessions.has(sessionID)) await this.#refreshSessions()
     await this.#restoreSnapshot(sessionID)
     if (this.#deletedSessions.has(sessionID) || !this.#sessions.has(sessionID)) {
       throw new Error("Harness session not found")
@@ -1703,6 +2069,10 @@ export class AcpService {
         }
       }
     }
+    // A single adapter process is not restarted by a request on its own, and the one that opened
+    // this Session may have exited since. A project-scoped client starts its own process per request.
+    await this.#requireSessionDirectory(session)
+    if (typeof this.#acp.withSession !== "function") await this.#acp.start?.()
     if (await this.#openWithoutReplay(sessionID, session)) return
     this.#replaying.add(sessionID)
     this.#messages.set(sessionID, [])
@@ -1720,9 +2090,11 @@ export class AcpService {
       if (this.#replaySettleMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, this.#replaySettleMs))
       }
-      this.#rememberConfigOptions(sessionID, result.configOptions)
+      this.#rememberSessionConfiguration(sessionID, result)
       const replayedMessages = mergeFragmentedPiSnapshot(this.#messages.get(sessionID) ?? [])
-      this.#messages.set(sessionID, replaceHistory ? replayedMessages : mergeReplay(previousMessages, replayedMessages))
+      this.#messages.set(sessionID, chronologicalReplay(this.#replayAuthoritative
+        ? authoritativeReplay(previousMessages, replayedMessages)
+        : replaceHistory ? replayedMessages : mergeReplay(previousMessages, replayedMessages)))
       // Replayed history is finished work by definition, and the adapter does not always close the
       // tool calls in it. Settling before the signature check keeps the restored (already settled)
       // snapshot and this replay comparable, so an unchanged history still reads as unchanged.
@@ -1755,6 +2127,15 @@ export class AcpService {
     return this.#historyLoader?.authoritativeHistory !== true && !this.#journalPageWhileOwned
   }
 
+  async #requireSessionDirectory(session) {
+    if (!this.#requireExistingDirectory) return
+    try {
+      if (!(await stat(session.cwd)).isDirectory()) throw new Error("Not a directory")
+    } catch (error) {
+      throw new Error(`Session project directory is missing or inaccessible: ${session.cwd}. History is still available; restore the directory before continuing this Session.`, { cause: error })
+    }
+  }
+
   /**
    * Open one stored Session on the ACP connection without asking for its transcript back.
    *
@@ -1778,7 +2159,7 @@ export class AcpService {
       300_000
     )
     this.#acpOpenSessions.add(sessionID)
-    this.#rememberConfigOptions(sessionID, result?.configOptions)
+    this.#rememberSessionConfiguration(sessionID, result)
     this.#loaded.add(sessionID)
     this.#persistSnapshot(sessionID)
     return true
@@ -1798,6 +2179,14 @@ export class AcpService {
       })
     }
     return this.#sessionListing
+  }
+
+  #rememberSessionConfiguration(sessionID, result) {
+    if (Array.isArray(result?.configOptions) || result?.models) {
+      this.#rememberConfigOptions(sessionID, modelConfigOptionFromSessionResponse(result))
+      this.#modelSwitchMethods.set(sessionID, Array.isArray(result?.models?.availableModels)
+        && !result?.configOptions?.some((option) => option.id === "model") ? "session/set_model" : "session/set_config_option")
+    }
   }
 
   #rememberConfigOptions(sessionID, configOptions) {
@@ -1860,6 +2249,16 @@ export class AcpService {
   #handleNotification({ method, params }) {
     if (method !== "session/update" || !params?.sessionId || !params.update) return
     const { sessionId, update } = params
+    const modelReply = this.#modelCommandReplies.get(sessionId)
+    if (update.sessionUpdate === "config_option_update" && Array.isArray(update.configOptions)) {
+      if (modelReply) modelReply.configurationUpdated = true
+      this.#rememberConfigOptions(sessionId, update.configOptions)
+      return
+    }
+    if (modelReply && ["agent_message_chunk", "user_message_chunk", "agent_thought_chunk"].includes(update.sessionUpdate)) {
+      if (update.sessionUpdate === "agent_message_chunk" && typeof update.content?.text === "string") modelReply.chunks.push(update.content.text)
+      return
+    }
     const replaying = this.#replaying.has(sessionId)
     const session = this.#sessions.get(sessionId)
     if (update.sessionUpdate === "available_commands_update") {
@@ -1911,8 +2310,13 @@ export class AcpService {
         id: update.toolCallId,
         messageID,
         type: "tool",
-        tool: update._meta?.toolName ?? update.title,
+        // Claude's adapter names the tool under its own namespace; without it the tool name fell back
+        // to the title, which for a shell call is the command line itself.
+        tool: update._meta?.toolName ?? update._meta?.claudeCode?.toolName ?? update.title,
         callID: update.toolCallId,
+        // ACP's own classification (read, edit, execute, search, fetch, think, ...): the client
+        // labels calls by it instead of guessing from tool names.
+        kind: typeof update.kind === "string" ? update.kind : undefined,
         state: {
           status: update.status === "in_progress" ? "running" : update.status,
           input: update.rawInput,
@@ -1931,7 +2335,13 @@ export class AcpService {
       const output = update.rawOutput ?? update.content
         ?.flatMap((item) => item.type === "content" && item.content?.type === "text" ? [item.content.text] : [])
         .join("")
-      tool.state.status = update.status === "in_progress" ? "running" : update.status === "failed" ? "error" : update.status
+      // An update carries only the fields that changed. The input and title in particular often
+      // arrive here rather than on the opening tool_call, and an update without a status must not
+      // erase the one the call already has.
+      if (update.status) tool.state.status = update.status === "in_progress" ? "running" : update.status === "failed" ? "error" : update.status
+      if (update.rawInput && typeof update.rawInput === "object") tool.state.input = update.rawInput
+      if (typeof update.title === "string" && update.title) tool.state.title = update.title
+      if (typeof update.kind === "string") tool.kind = update.kind
       if (output) tool.state.output = typeof output === "string" ? output : JSON.stringify(output)
       if (tool.state.time && ["completed", "error"].includes(tool.state.status)) tool.state.time.end = Date.now()
       if (!replaying) this.#emit("message.updated", sessionId)
@@ -1956,16 +2366,29 @@ export class AcpService {
       : undefined
     if (!image && (update.content?.type !== "text" || !update.content.text)) return
     const role = update.sessionUpdate === "user_message_chunk" ? "user" : "assistant"
+    if (!replaying && role === "assistant" && !thought && (image || update.content.text?.trim())) {
+      this.#turnResponseObserved.add(sessionId)
+    }
     const partType = thought ? "reasoning" : image ? "file" : "text"
     // Acknowledgements only suppress a live echo of the prompt we just recorded;
     if (role === "assistant" && !replaying && this.#cancelledSessions.has(sessionId)) return
     if (role === "assistant" && !replaying && !this.#active.has(sessionId) && !this.#promptedSessions.has(sessionId)) return
     if (role === "user" && !replaying && this.#isAcknowledgedPromptChunk(sessionId, update.content.text)) return
     if (role === "user" && !image && isHarnessInjectedText(update.content.text)) return
+    if (role === "user" && !image && isInterruptionMarker(update.content.text)) {
+      const messages = this.#messages.get(sessionId) ?? []
+      this.#messages.set(sessionId, messages)
+      markLatestTurnInterrupted(messages, sessionId)
+      // Whatever the adapter sends next belongs to a new reply, not to the interrupted one.
+      this.#chunkMessageIDs.delete(`${sessionId}:assistant`)
+      if (!replaying) this.#emit("message.updated", sessionId)
+      return
+    }
     if (!replaying && session) session.updatedAt = new Date().toISOString()
     const counterpartKey = `${sessionId}:${role === "user" ? "assistant" : "user"}`
     this.#chunkMessageIDs.delete(counterpartKey)
     const chunkKey = `${sessionId}:${role}`
+    if (replaying && role === "user" && this.#replayUserChunksAreMessages) this.#chunkMessageIDs.delete(chunkKey)
     // PI sends a new message id for every streaming fragment. During a live turn the bridge's
     // id is authoritative, so all adjacent fragments remain one Markdown message. Replay keeps
     // adapter ids because it reconstructs historical conversation boundaries.
