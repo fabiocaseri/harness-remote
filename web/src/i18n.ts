@@ -45,6 +45,48 @@ type TranslationKey =
   | 'settings.themeSystem'
   | 'settings.themeLight'
   | 'settings.themeDark'
+  | 'settings.thisComputer'
+  | 'settings.projectFolders'
+  | 'settings.projectFoldersHint'
+  | 'settings.projectFoldersLoading'
+  | 'settings.projectFoldersAdd'
+  | 'settings.projectFoldersRemove'
+  | 'settings.projectFoldersOverride'
+  | 'settings.projectFoldersError'
+  | 'settings.remoteProjectFoldersHint'
+  | 'machine.editTitle'
+  | 'machine.localConnectionHint'
+  | 'machine.foldersSaveHint'
+  | 'machine.foldersUnavailable'
+  | 'machine.saving'
+  | 'machine.testFoldersHint'
+  | 'machine.managedByApp'
+  | 'machine.folderPickerTitle'
+  | 'machine.restartTitle'
+  | 'machine.restartMessage'
+  | 'machine.restartDetail'
+  | 'machine.restartNow'
+  | 'machine.foldersInvalid'
+  | 'machine.folderPathInvalid'
+  | 'machine.folderMissing'
+  | 'machine.foldersBusy'
+  | 'machine.foldersControlled'
+  | 'machine.folderPickerError'
+  | 'machine.networkPairingTitle'
+  | 'machine.networkPairingEnable'
+  | 'machine.networkPairingHint'
+  | 'machine.networkPairingConfirmMessage'
+  | 'machine.networkPairingConfirmDetail'
+  | 'machine.networkPairingConfirmDisableDetail'
+  | 'machine.networkPairingError'
+  | 'machine.runtimeBusy'
+  | 'machine.connectionInvalid'
+  | 'machine.probeUnsupported'
+  | 'machine.connectionCheckFailed'
+  | 'machine.editorLabel'
+  | 'machine.agentRunning'
+  | 'machine.agentReady'
+  | 'machine.agentUnavailable'
   | 'settings.draftHint'
   | 'settings.testedNotSaved'
   | 'settings.savedButton'
@@ -121,6 +163,9 @@ type TranslationKey =
   | 'detail.jumpToLatest'
   | 'detail.you'
   | 'detail.opencode'
+  | 'detail.opencode2'
+  | 'detail.copilot'
+  | 'detail.mimo'
   | 'detail.projectDashboardLabel'
   | 'detail.projectLabel'
   | 'detail.vcsLabel'
@@ -213,10 +258,13 @@ type TranslationKey =
   | 'connect.step.address'
   | 'connect.step.credentials'
   | 'connect.harness.opencode'
+  | 'connect.harness.opencode2'
   | 'connect.harness.omp'
   | 'connect.harness.pi'
   | 'connect.harness.claude'
   | 'connect.harness.codex'
+  | 'connect.harness.copilot'
+  | 'connect.harness.mimo'
   | 'connect.addressHint'
   | 'connect.runOnHost'
   | 'connect.copyCommand'
@@ -311,6 +359,8 @@ type TranslationKey =
   | 'sf.machines'
   | 'sf.refresh'
   | 'sf.refreshingMachines'
+  | 'sf.hideSessionControls'
+  | 'sf.showSessionControls'
   | 'sf.refreshingSessions'
   | 'sf.machineCount'
   | 'sf.connecting'
@@ -350,6 +400,8 @@ type TranslationKey =
   | 'sf.noSessionsOnMachine'
   | 'sf.attentionCount'
   | 'sf.liveCount'
+  | 'sf.readyCount'
+  | 'sf.unseenResult'
   | 'sf.offline'
   | 'sf.statusWorking'
   | 'sf.statusReady'
@@ -372,6 +424,78 @@ type TranslationKey =
   | 'sf.noProjectAvailable'
   | 'sf.noAgentCanCreate'
   | 'sf.cancel'
+  | 'act.label'
+  | 'act.working'
+  | 'act.worked'
+  | 'act.workedFor'
+  | 'act.failed'
+  | 'act.thinking'
+  | 'act.writing'
+  | 'act.thought'
+  | 'act.thoughtFor'
+  | 'act.expandAll'
+  | 'act.collapseAll'
+  | 'act.collapse'
+  | 'act.showEarlier'
+  | 'act.showEarlier.one'
+  | 'act.steps'
+  | 'act.steps.one'
+  | 'act.outputTruncated'
+  | 'act.status.failed'
+  | 'act.status.incomplete'
+  | 'act.count.run'
+  | 'act.count.run.one'
+  | 'act.count.read'
+  | 'act.count.read.one'
+  | 'act.count.edit'
+  | 'act.count.edit.one'
+  | 'act.count.search'
+  | 'act.count.search.one'
+  | 'act.count.web'
+  | 'act.count.web.one'
+  | 'act.count.task'
+  | 'act.count.task.one'
+  | 'act.count.todo'
+  | 'act.count.todo.one'
+  | 'act.count.tool'
+  | 'act.count.tool.one'
+  | 'act.verb.run.done'
+  | 'act.verb.run.live'
+  | 'act.verb.read.done'
+  | 'act.verb.read.live'
+  | 'act.verb.edit.done'
+  | 'act.verb.edit.live'
+  | 'act.verb.search.done'
+  | 'act.verb.search.live'
+  | 'act.verb.web.done'
+  | 'act.verb.web.live'
+  | 'act.verb.task.done'
+  | 'act.verb.task.live'
+  | 'act.verb.todo.done'
+  | 'act.verb.todo.live'
+  | 'settings.activityTitle'
+  | 'settings.activityHint'
+  | 'settings.activityLive'
+  | 'settings.activityLive.latest'
+  | 'settings.activityLive.highlights'
+  | 'settings.activityLive.expanded'
+  | 'settings.activityLive.collapsed'
+  | 'settings.activityFinished'
+  | 'settings.activityFinished.collapsed'
+  | 'settings.activityFinished.highlights'
+  | 'settings.activityFinished.expanded'
+  | 'settings.activityReasoning'
+  | 'settings.activityReasoning.collapsed'
+  | 'settings.activityReasoning.expanded'
+  | 'settings.activityReasoning.hidden'
+  | 'ctx.undo'
+  | 'ctx.redo'
+  | 'ctx.cut'
+  | 'ctx.copy'
+  | 'ctx.paste'
+  | 'ctx.selectAll'
+  | 'ctx.copyLink'
+  | 'ctx.inspect'
   | 'sf.createSession'
   | 'sf.creating'
   | 'sf.renameSession'
@@ -385,6 +509,7 @@ type TranslationKey =
   | 'sf.renameSessionNamed'
   | 'sf.deleteSessionTitle'
   | 'sf.deleteSubtitle'
+  | 'sf.hideSessionSubtitle'
   | 'sf.closeDelete'
   | 'sf.keepSession'
   | 'sf.deleteSession'
@@ -419,6 +544,31 @@ type TranslationKey =
   | 'sf.pairingFailed'
   | 'sf.qrPairingFailed'
   | 'sf.dismissPairingStatus'
+  | 'pair.action'
+  | 'pair.title'
+  | 'pair.subtitle'
+  | 'pair.issuing'
+  | 'pair.qrLabel'
+  | 'pair.qrUnavailable'
+  | 'pair.address'
+  | 'pair.expiresIn'
+  | 'pair.expiredTitle'
+  | 'pair.expiredBody'
+  | 'pair.regenerate'
+  | 'pair.replaceHint'
+  | 'pair.claimedTitle'
+  | 'pair.claimedBody'
+  | 'pair.pairAnother'
+  | 'pair.loopbackTitle'
+  | 'pair.loopbackBody'
+  | 'pair.loopbackLocalHint'
+  | 'pair.loopbackLocalAction'
+  | 'pair.unsupportedTitle'
+  | 'pair.unsupportedBody'
+  | 'pair.failedTitle'
+  | 'pair.noAddressTitle'
+  | 'pair.noAddressBody'
+  | 'pair.retry'
   | 'sf.preparing'
   | 'sf.connectingMachines'
   | 'sf.connectingBody'
@@ -550,6 +700,48 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'settings.themeSystem': 'System',
     'settings.themeLight': 'Light',
     'settings.themeDark': 'Dark',
+    'settings.thisComputer': 'This computer',
+    'settings.projectFolders': 'Project folders',
+    'settings.projectFoldersHint': 'Choose folders available when creating a local Session. With no folders listed, your home folder is used.',
+    'settings.projectFoldersLoading': 'Loading project folders…',
+    'settings.projectFoldersAdd': 'Add folder…',
+    'settings.projectFoldersRemove': 'Remove',
+    'settings.projectFoldersOverride': 'Controlled by HARNESS_REMOTE_ROOT ({root}). These folders are read-only.',
+    'settings.projectFoldersError': 'Could not update project folders.',
+    'settings.remoteProjectFoldersHint': 'Project folders belong to this machine. Configure them on its daemon with --root when starting Harness Remote there.',
+    'machine.editTitle': 'Edit machine',
+    'machine.localConnectionHint': 'Connection settings on this computer are managed automatically by Harness Remote.',
+    'machine.foldersSaveHint': 'Folder changes apply only when you save. Restarting the local runtime requires confirmation.',
+    'machine.foldersUnavailable': 'Project folders are not reported by this machine.',
+    'machine.saving': 'Saving…',
+    'machine.testFoldersHint': 'Test the connection to read this machine’s project folders.',
+    'machine.managedByApp': 'Managed by Harness Remote',
+    'machine.folderPickerTitle': 'Add project folder',
+    'machine.restartTitle': 'Restart local runtime?',
+    'machine.restartMessage': 'Changing project folders restarts the local runtime.',
+    'machine.restartDetail': 'Any Session running on this computer will be interrupted. Wait for local Sessions to finish before continuing.',
+    'machine.restartNow': 'Restart now',
+    'machine.foldersInvalid': 'Project folders are invalid.',
+    'machine.folderPathInvalid': 'Project folder path is invalid.',
+    'machine.folderMissing': 'Project folder does not exist or is not a directory.',
+    'machine.foldersBusy': 'Project folders are already being updated. Try again in a moment.',
+    'machine.foldersControlled': 'Project folders are controlled by HARNESS_REMOTE_ROOT.',
+    'machine.folderPickerError': 'Could not open the folder picker.',
+    'machine.networkPairingTitle': 'Phone pairing',
+    'machine.networkPairingEnable': 'Allow phones on the local network to pair with this computer',
+    'machine.networkPairingHint': 'The daemon stays password-protected, but becomes reachable from your network. If your system asks to allow incoming connections, accept. Changing this restarts the local runtime.',
+    'machine.networkPairingConfirmMessage': 'Apply the phone pairing change and restart the local runtime?',
+    'machine.networkPairingConfirmDetail': 'Phones on your local network will be able to reach this computer’s daemon. It stays password-protected, and pairing still requires a one-time code.',
+    'machine.networkPairingConfirmDisableDetail': 'Phones on your local network will no longer reach this computer’s daemon. Outstanding pairing links stop working.',
+    'machine.networkPairingError': 'The phone pairing setting could not be updated.',
+    'machine.runtimeBusy': 'Another local runtime change is in progress. Try again in a moment.',
+    'machine.connectionInvalid': 'Machine connection is invalid.',
+    'machine.probeUnsupported': 'Unsupported machine configuration probe.',
+    'machine.connectionCheckFailed': 'Could not check this machine’s connection.',
+    'machine.editorLabel': 'Machine configuration',
+    'machine.agentRunning': 'Running',
+    'machine.agentReady': 'Ready',
+    'machine.agentUnavailable': 'Unavailable',
     'sessions.title': 'Sessions',
     'sessions.summary': '{total} total · {active} active · {changed} changed',
     'sessions.new': 'New Session',
@@ -604,7 +796,10 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.send': 'Send',
     'detail.jumpToLatest': 'Go to latest',
     'detail.you': '👤 You',
-    'detail.opencode': '🤖 OpenCode',
+    'detail.opencode': '🤖 OpenCode Legacy',
+    'detail.opencode2': '🤖 OpenCode 2',
+    'detail.copilot': '🤖 GitHub Copilot CLI',
+    'detail.mimo': '🤖 MiMo Code',
     'detail.projectDashboardLabel': 'Project and VCS dashboard',
     'detail.projectLabel': 'Project',
     'detail.vcsLabel': 'VCS',
@@ -763,11 +958,14 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'connect.step.harness': 'Harness',
     'connect.step.address': 'Address',
     'connect.step.credentials': 'Credentials',
-    'connect.harness.opencode': 'Connect directly to an OpenCode server.',
+    'connect.harness.opencode': 'Connect directly to an OpenCode Legacy server.',
+    'connect.harness.opencode2': 'Connect to OpenCode 2 through the ACP bridge.',
     'connect.harness.omp': 'Connect through the bundled Oh My Pi bridge.',
     'connect.harness.pi': 'Connect to PI through the ACP bridge.',
     'connect.harness.claude': 'Connect to Claude Code through the ACP bridge.',
     'connect.harness.codex': 'Connect to Codex CLI through the ACP bridge.',
+    'connect.harness.copilot': 'Connect to GitHub Copilot CLI through the ACP bridge.',
+    'connect.harness.mimo': 'Connect to MiMo Code through the ACP bridge.',
     'connect.addressHint': 'Use the LAN address of the machine that runs the harness.',
     'connect.runOnHost': 'Run on the host machine',
     'connect.copyCommand': 'Copy command',
@@ -795,6 +993,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.machines': 'Machines',
     'sf.refresh': 'Refresh',
     'sf.refreshingMachines': 'Refreshing machines',
+    'sf.hideSessionControls': 'Hide Session controls',
+    'sf.showSessionControls': 'Show Session controls',
     'sf.refreshingSessions': 'Refreshing Sessions',
     'sf.machineCount': '{online}/{total} machines',
     'sf.connecting': 'Connecting',
@@ -834,6 +1034,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.noSessionsOnMachine': 'No native Sessions discovered on this machine.',
     'sf.attentionCount': '{count} attention',
     'sf.liveCount': '{count} live',
+    'sf.readyCount': '{count} ready',
+    'sf.unseenResult': 'new result',
     'sf.offline': 'Offline',
     'sf.statusWorking': 'Working',
     'sf.statusReady': 'Ready',
@@ -856,6 +1058,78 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.noProjectAvailable': 'No Project is available on the selected machine.',
     'sf.noAgentCanCreate': 'No installed coding agent can create a native Session on this machine yet.',
     'sf.cancel': 'Cancel',
+    'act.label': 'Agent activity',
+    'act.working': 'Working',
+    'act.worked': 'Worked',
+    'act.workedFor': 'Worked for {duration}',
+    'act.failed': 'Stopped with an error',
+    'act.thinking': 'Thinking…',
+    'act.writing': 'Writing…',
+    'act.thought': 'Thought',
+    'act.thoughtFor': 'Thought for {duration}',
+    'act.expandAll': 'Expand all',
+    'act.collapseAll': 'Collapse all',
+    'act.collapse': 'Collapse activity',
+    'act.showEarlier': 'Show {count} earlier steps',
+    'act.showEarlier.one': 'Show 1 earlier step',
+    'act.steps': '{count} steps',
+    'act.steps.one': '1 step',
+    'act.outputTruncated': 'Showing the first {count} characters. Copy to get the full output.',
+    'act.status.failed': 'Failed',
+    'act.status.incomplete': 'No result',
+    'act.count.run': '{count} commands',
+    'act.count.run.one': '1 command',
+    'act.count.read': '{count} reads',
+    'act.count.read.one': '1 read',
+    'act.count.edit': '{count} edits',
+    'act.count.edit.one': '1 edit',
+    'act.count.search': '{count} searches',
+    'act.count.search.one': '1 search',
+    'act.count.web': '{count} web fetches',
+    'act.count.web.one': '1 web fetch',
+    'act.count.task': '{count} subagents',
+    'act.count.task.one': '1 subagent',
+    'act.count.todo': '{count} plan updates',
+    'act.count.todo.one': '1 plan update',
+    'act.count.tool': '{count} tool calls',
+    'act.count.tool.one': '1 tool call',
+    'act.verb.run.done': 'Ran',
+    'act.verb.run.live': 'Running',
+    'act.verb.read.done': 'Read',
+    'act.verb.read.live': 'Reading',
+    'act.verb.edit.done': 'Edited',
+    'act.verb.edit.live': 'Editing',
+    'act.verb.search.done': 'Searched',
+    'act.verb.search.live': 'Searching',
+    'act.verb.web.done': 'Fetched',
+    'act.verb.web.live': 'Fetching',
+    'act.verb.task.done': 'Delegated',
+    'act.verb.task.live': 'Delegating',
+    'act.verb.todo.done': 'Updated the plan',
+    'act.verb.todo.live': 'Updating the plan',
+    'settings.activityTitle': 'Conversation activity',
+    'settings.activityHint': 'What the agent does between your message and its answer: its updates, its reasoning and the tools it runs. Changes apply to open conversations immediately.',
+    'settings.activityLive': 'While the agent works',
+    'settings.activityLive.latest': 'Show its latest update',
+    'settings.activityLive.highlights': 'Show all its updates',
+    'settings.activityLive.expanded': 'Show every step',
+    'settings.activityLive.collapsed': 'Only a summary line',
+    'settings.activityFinished': 'After it answers',
+    'settings.activityFinished.collapsed': 'Collapse to a summary line',
+    'settings.activityFinished.highlights': 'Keep its updates, hide the steps',
+    'settings.activityFinished.expanded': 'Keep every step open',
+    'settings.activityReasoning': 'Reasoning',
+    'settings.activityReasoning.collapsed': 'Collapsed to one line',
+    'settings.activityReasoning.expanded': 'Expanded',
+    'settings.activityReasoning.hidden': 'Hidden',
+    'ctx.undo': 'Undo',
+    'ctx.redo': 'Redo',
+    'ctx.cut': 'Cut',
+    'ctx.copy': 'Copy',
+    'ctx.paste': 'Paste',
+    'ctx.selectAll': 'Select all',
+    'ctx.copyLink': 'Copy link address',
+    'ctx.inspect': 'Inspect element',
     'sf.createSession': 'Create Session',
     'sf.creating': 'Creating…',
     'sf.renameSession': 'Rename Session',
@@ -869,6 +1143,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.renameSessionNamed': 'Rename Session: {title}',
     'sf.deleteSessionTitle': 'Delete “{title}”?',
     'sf.deleteSubtitle': 'This deletes the native Session from {agent}. This cannot be undone from Harness Remote.',
+    'sf.hideSessionSubtitle': 'This hides the Session from Harness Remote. The native Session remains in {agent}.',
     'sf.closeDelete': 'Close Delete Session',
     'sf.keepSession': 'Keep Session',
     'sf.deleteSession': 'Delete Session',
@@ -903,6 +1178,31 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.pairingFailed': 'Machine pairing failed.',
     'sf.qrPairingFailed': 'QR pairing failed.',
     'sf.dismissPairingStatus': 'Dismiss machine pairing status',
+    'pair.action': 'Pair a phone',
+    'pair.title': 'Pair a phone',
+    'pair.subtitle': 'Scan this QR with Harness Remote on your phone to add {name}.',
+    'pair.issuing': 'Preparing a pairing code…',
+    'pair.qrLabel': 'Machine pairing QR code',
+    'pair.qrUnavailable': 'The pairing code could not be rendered. Regenerate it and try again.',
+    'pair.address': 'Address',
+    'pair.expiresIn': 'Expires in {time}',
+    'pair.expiredTitle': 'Pairing code expired',
+    'pair.expiredBody': 'A pairing code stays valid for 5 minutes. Regenerate one to connect a phone.',
+    'pair.regenerate': 'Regenerate code',
+    'pair.replaceHint': 'Regenerating replaces the previous code immediately.',
+    'pair.claimedTitle': 'Phone paired',
+    'pair.claimedBody': '{name} is now available in Harness Remote on your phone.',
+    'pair.pairAnother': 'Pair another phone',
+    'pair.loopbackTitle': 'A phone cannot reach this machine',
+    'pair.loopbackBody': 'This machine’s daemon only accepts local connections. Configure it to listen on the LAN and restart it, then regenerate the code.',
+    'pair.loopbackLocalHint': 'To pair phones over your network, turn on phone pairing in Settings first.',
+    'pair.loopbackLocalAction': 'Open Settings',
+    'pair.unsupportedTitle': 'This daemon does not support phone pairing yet',
+    'pair.unsupportedBody': 'Update Harness Remote on {name}, then try again.',
+    'pair.failedTitle': 'Pairing code unavailable',
+    'pair.noAddressTitle': 'No address a phone can reach',
+    'pair.noAddressBody': 'This machine reports no network address usable for pairing. Check its network connection and try again.',
+    'pair.retry': 'Try again',
     'sf.preparing': 'Preparing Harness Remote',
     'sf.connectingMachines': 'Connecting to your machines…',
     'sf.connectingBody': 'Discovering Projects, installed coding agents and native Sessions. An ACP harness may need a few seconds to start.',
@@ -1034,6 +1334,48 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'settings.themeSystem': 'Sistema',
     'settings.themeLight': 'Chiaro',
     'settings.themeDark': 'Scuro',
+    'settings.thisComputer': 'Questo computer',
+    'settings.projectFolders': 'Cartelle dei progetti',
+    'settings.projectFoldersHint': 'Scegli le cartelle disponibili quando crei una Sessione locale. Se non elenchi cartelle, viene usata la cartella home.',
+    'settings.projectFoldersLoading': 'Caricamento cartelle dei progetti…',
+    'settings.projectFoldersAdd': 'Aggiungi cartella…',
+    'settings.projectFoldersRemove': 'Rimuovi',
+    'settings.projectFoldersOverride': 'Gestite da HARNESS_REMOTE_ROOT ({root}). Queste cartelle sono di sola lettura.',
+    'settings.projectFoldersError': 'Impossibile aggiornare le cartelle dei progetti.',
+    'settings.remoteProjectFoldersHint': 'Le cartelle dei progetti appartengono a questa macchina. Configurale sul suo daemon con --root quando avvii Harness Remote su quella macchina.',
+    'machine.editTitle': 'Modifica macchina',
+    'machine.localConnectionHint': 'La connessione di questo computer è gestita automaticamente da Harness Remote.',
+    'machine.foldersSaveHint': 'Le cartelle vengono applicate solo al salvataggio. Il riavvio del runtime locale richiede conferma.',
+    'machine.foldersUnavailable': 'Le cartelle dei progetti non sono comunicate da questa macchina.',
+    'machine.saving': 'Salvataggio…',
+    'machine.testFoldersHint': 'Verifica la connessione per leggere le cartelle dei progetti di questa macchina.',
+    'machine.managedByApp': 'Gestito da Harness Remote',
+    'machine.folderPickerTitle': 'Aggiungi cartella progetto',
+    'machine.restartTitle': 'Riavviare il runtime locale?',
+    'machine.restartMessage': 'Modificando le cartelle dei progetti, il runtime locale verrà riavviato.',
+    'machine.restartDetail': 'Le Sessioni in esecuzione su questo computer verranno interrotte. Attendi che le Sessioni locali terminino prima di continuare.',
+    'machine.restartNow': 'Riavvia ora',
+    'machine.foldersInvalid': 'Le cartelle dei progetti non sono valide.',
+    'machine.folderPathInvalid': 'Il percorso della cartella progetto non è valido.',
+    'machine.folderMissing': 'La cartella progetto non esiste o non è una directory.',
+    'machine.foldersBusy': 'Le cartelle dei progetti sono già in aggiornamento. Riprova tra poco.',
+    'machine.foldersControlled': 'Le cartelle dei progetti sono gestite da HARNESS_REMOTE_ROOT.',
+    'machine.folderPickerError': 'Impossibile aprire il selettore di cartelle.',
+    'machine.networkPairingTitle': 'Pairing del telefono',
+    'machine.networkPairingEnable': 'Consenti ai telefoni sulla rete locale di accoppiarsi con questo computer',
+    'machine.networkPairingHint': 'Il daemon resta protetto da password, ma diventa raggiungibile dalla tua rete. Se il sistema chiede di consentire le connessioni in entrata, accetta. Modificando questa opzione il runtime locale verrà riavviato.',
+    'machine.networkPairingConfirmMessage': 'Applicare la modifica al pairing del telefono e riavviare il runtime locale?',
+    'machine.networkPairingConfirmDetail': 'I telefoni sulla rete locale potranno raggiungere il daemon di questo computer. Resta protetto da password e il pairing richiede comunque un codice monouso.',
+    'machine.networkPairingConfirmDisableDetail': 'I telefoni sulla rete locale non potranno più raggiungere il daemon di questo computer. I link di pairing ancora attivi smetteranno di funzionare.',
+    'machine.networkPairingError': 'Impossibile aggiornare l’impostazione di pairing del telefono.',
+    'machine.runtimeBusy': 'Un’altra modifica al runtime locale è in corso. Riprova tra un momento.',
+    'machine.connectionInvalid': 'La connessione della macchina non è valida.',
+    'machine.probeUnsupported': 'Verifica della configurazione della macchina non supportata.',
+    'machine.connectionCheckFailed': 'Impossibile verificare la connessione a questa macchina.',
+    'machine.editorLabel': 'Configurazione macchina',
+    'machine.agentRunning': 'In esecuzione',
+    'machine.agentReady': 'Pronto',
+    'machine.agentUnavailable': 'Non disponibile',
     'sessions.title': 'Sessioni',
     'sessions.summary': '{total} totali · {active} attive · {changed} con modifiche',
     'sessions.new': 'Nuova sessione',
@@ -1088,7 +1430,10 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.send': 'Invia',
     'detail.jumpToLatest': 'Vai alla fine',
     'detail.you': '👤 Tu',
-    'detail.opencode': '🤖 OpenCode',
+    'detail.opencode': '🤖 OpenCode Legacy',
+    'detail.opencode2': '🤖 OpenCode 2',
+    'detail.copilot': '🤖 GitHub Copilot CLI',
+    'detail.mimo': '🤖 MiMo Code',
     'detail.projectDashboardLabel': 'Dashboard progetto e VCS',
     'detail.projectLabel': 'Progetto',
     'detail.vcsLabel': 'VCS',
@@ -1247,11 +1592,14 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'connect.step.harness': 'Harness',
     'connect.step.address': 'Indirizzo',
     'connect.step.credentials': 'Credenziali',
-    'connect.harness.opencode': 'Connessione diretta a un server OpenCode.',
+    'connect.harness.opencode': 'Connessione diretta a un server OpenCode Legacy.',
+    'connect.harness.opencode2': 'Connessione a OpenCode 2 tramite bridge ACP.',
     'connect.harness.omp': 'Connessione tramite il bridge incluso per Oh My Pi.',
     'connect.harness.pi': 'Connessione a PI tramite bridge ACP.',
     'connect.harness.claude': 'Connessione a Claude Code tramite bridge ACP.',
     'connect.harness.codex': 'Connessione a Codex CLI tramite bridge ACP.',
+    'connect.harness.copilot': 'Connessione a GitHub Copilot CLI tramite bridge ACP.',
+    'connect.harness.mimo': 'Connessione a MiMo Code tramite bridge ACP.',
     'connect.addressHint': 'Usa l’indirizzo LAN del computer che esegue l’harness.',
     'connect.runOnHost': 'Esegui sul computer host',
     'connect.copyCommand': 'Copia comando',
@@ -1279,6 +1627,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.machines': 'Macchine',
     'sf.refresh': 'Aggiorna',
     'sf.refreshingMachines': 'Aggiornamento macchine',
+    'sf.hideSessionControls': 'Nascondi controlli sessione',
+    'sf.showSessionControls': 'Mostra controlli sessione',
     'sf.refreshingSessions': 'Aggiornamento sessioni',
     'sf.machineCount': '{online}/{total} macchine',
     'sf.connecting': 'Connessione',
@@ -1318,6 +1668,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.noSessionsOnMachine': 'Nessuna sessione nativa trovata su questa macchina.',
     'sf.attentionCount': '{count} da vedere',
     'sf.liveCount': '{count} attive',
+    'sf.readyCount': '{count} pronte',
+    'sf.unseenResult': 'nuovo risultato',
     'sf.offline': 'Offline',
     'sf.statusWorking': 'In lavorazione',
     'sf.statusReady': 'Pronta',
@@ -1340,6 +1692,78 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.noProjectAvailable': 'Nessun progetto disponibile sulla macchina selezionata.',
     'sf.noAgentCanCreate': 'Nessun coding agent installato può ancora creare una sessione nativa su questa macchina.',
     'sf.cancel': 'Annulla',
+    'act.label': "Attività dell'agente",
+    'act.working': 'Al lavoro',
+    'act.worked': 'Lavoro svolto',
+    'act.workedFor': 'Ha lavorato per {duration}',
+    'act.failed': 'Interrotto da un errore',
+    'act.thinking': 'Sta ragionando…',
+    'act.writing': 'Sta scrivendo…',
+    'act.thought': 'Ragionamento',
+    'act.thoughtFor': 'Ha ragionato per {duration}',
+    'act.expandAll': 'Espandi tutto',
+    'act.collapseAll': 'Comprimi tutto',
+    'act.collapse': 'Comprimi attività',
+    'act.showEarlier': 'Mostra {count} passaggi precedenti',
+    'act.showEarlier.one': 'Mostra 1 passaggio precedente',
+    'act.steps': '{count} passaggi',
+    'act.steps.one': '1 passaggio',
+    'act.outputTruncated': "Sono mostrati i primi {count} caratteri. Copia per avere l'output completo.",
+    'act.status.failed': 'Non riuscito',
+    'act.status.incomplete': 'Nessun risultato',
+    'act.count.run': '{count} comandi',
+    'act.count.run.one': '1 comando',
+    'act.count.read': '{count} letture',
+    'act.count.read.one': '1 lettura',
+    'act.count.edit': '{count} modifiche',
+    'act.count.edit.one': '1 modifica',
+    'act.count.search': '{count} ricerche',
+    'act.count.search.one': '1 ricerca',
+    'act.count.web': '{count} pagine web',
+    'act.count.web.one': '1 pagina web',
+    'act.count.task': '{count} subagenti',
+    'act.count.task.one': '1 subagente',
+    'act.count.todo': '{count} aggiornamenti del piano',
+    'act.count.todo.one': '1 aggiornamento del piano',
+    'act.count.tool': '{count} strumenti',
+    'act.count.tool.one': '1 strumento',
+    'act.verb.run.done': 'Eseguito',
+    'act.verb.run.live': 'In esecuzione',
+    'act.verb.read.done': 'Letto',
+    'act.verb.read.live': 'Lettura di',
+    'act.verb.edit.done': 'Modificato',
+    'act.verb.edit.live': 'Modifica di',
+    'act.verb.search.done': 'Cercato',
+    'act.verb.search.live': 'Ricerca di',
+    'act.verb.web.done': 'Scaricato',
+    'act.verb.web.live': 'Download di',
+    'act.verb.task.done': 'Delegato',
+    'act.verb.task.live': 'Delega in corso',
+    'act.verb.todo.done': 'Piano aggiornato',
+    'act.verb.todo.live': 'Aggiornamento del piano',
+    'settings.activityTitle': 'Attività nelle conversazioni',
+    'settings.activityHint': "Ciò che l'agente fa tra il tuo messaggio e la risposta: i suoi aggiornamenti, il ragionamento e gli strumenti che usa. Le modifiche valgono subito anche per le conversazioni aperte.",
+    'settings.activityLive': "Mentre l'agente lavora",
+    'settings.activityLive.latest': "Mostra l'ultimo aggiornamento",
+    'settings.activityLive.highlights': 'Mostra tutti gli aggiornamenti',
+    'settings.activityLive.expanded': 'Mostra ogni passaggio',
+    'settings.activityLive.collapsed': 'Solo una riga di riepilogo',
+    'settings.activityFinished': 'Dopo la risposta',
+    'settings.activityFinished.collapsed': 'Riduci a una riga di riepilogo',
+    'settings.activityFinished.highlights': 'Tieni gli aggiornamenti, nascondi i passaggi',
+    'settings.activityFinished.expanded': 'Lascia aperti tutti i passaggi',
+    'settings.activityReasoning': 'Ragionamento',
+    'settings.activityReasoning.collapsed': 'Compresso su una riga',
+    'settings.activityReasoning.expanded': 'Espanso',
+    'settings.activityReasoning.hidden': 'Nascosto',
+    'ctx.undo': 'Annulla',
+    'ctx.redo': 'Ripeti',
+    'ctx.cut': 'Taglia',
+    'ctx.copy': 'Copia',
+    'ctx.paste': 'Incolla',
+    'ctx.selectAll': 'Seleziona tutto',
+    'ctx.copyLink': 'Copia indirizzo link',
+    'ctx.inspect': 'Ispeziona elemento',
     'sf.createSession': 'Crea sessione',
     'sf.creating': 'Creazione…',
     'sf.renameSession': 'Rinomina sessione',
@@ -1353,6 +1777,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.renameSessionNamed': 'Rinomina sessione: {title}',
     'sf.deleteSessionTitle': 'Eliminare “{title}”?',
     'sf.deleteSubtitle': 'Elimina la sessione nativa da {agent}. L\'operazione non è annullabile da Harness Remote.',
+    'sf.hideSessionSubtitle': 'Nasconde la sessione da Harness Remote. La sessione nativa resta in {agent}.',
     'sf.closeDelete': 'Chiudi Elimina sessione',
     'sf.keepSession': 'Mantieni sessione',
     'sf.deleteSession': 'Elimina sessione',
@@ -1387,6 +1812,31 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.pairingFailed': 'Collegamento della macchina non riuscito.',
     'sf.qrPairingFailed': 'Collegamento tramite QR non riuscito.',
     'sf.dismissPairingStatus': 'Chiudi stato collegamento macchina',
+    'pair.action': 'Abbina un telefono',
+    'pair.title': 'Abbina un telefono',
+    'pair.subtitle': 'Scansiona questo QR con Harness Remote sul telefono per aggiungere {name}.',
+    'pair.issuing': 'Preparazione codice di abbinamento…',
+    'pair.qrLabel': 'Codice QR di abbinamento macchina',
+    'pair.qrUnavailable': 'Impossibile mostrare il codice di abbinamento. Rigeneralo e riprova.',
+    'pair.address': 'Indirizzo',
+    'pair.expiresIn': 'Scade tra {time}',
+    'pair.expiredTitle': 'Codice di abbinamento scaduto',
+    'pair.expiredBody': 'Un codice di abbinamento resta valido per 5 minuti. Rigenerane uno per collegare un telefono.',
+    'pair.regenerate': 'Rigenera codice',
+    'pair.replaceHint': 'La rigenerazione sostituisce subito il codice precedente.',
+    'pair.claimedTitle': 'Telefono abbinato',
+    'pair.claimedBody': '{name} è ora disponibile in Harness Remote sul tuo telefono.',
+    'pair.pairAnother': 'Abbina un altro telefono',
+    'pair.loopbackTitle': 'Un telefono non può raggiungere questa macchina',
+    'pair.loopbackBody': 'Il daemon di questa macchina accetta solo connessioni locali. Configuralo per ascoltare sulla LAN e riavvialo, poi rigenera il codice.',
+    'pair.loopbackLocalHint': 'Per accoppiare telefoni sulla rete, attiva prima il pairing del telefono nelle Impostazioni.',
+    'pair.loopbackLocalAction': 'Apri le Impostazioni',
+    'pair.unsupportedTitle': 'Questo daemon non supporta ancora l’abbinamento del telefono',
+    'pair.unsupportedBody': 'Aggiorna Harness Remote su {name}, poi riprova.',
+    'pair.failedTitle': 'Codice di abbinamento non disponibile',
+    'pair.noAddressTitle': 'Nessun indirizzo raggiungibile da un telefono',
+    'pair.noAddressBody': 'Questa macchina non segnala indirizzi di rete utilizzabili per l’abbinamento. Controlla la connessione di rete e riprova.',
+    'pair.retry': 'Riprova',
     'sf.preparing': 'Preparazione di Harness Remote',
     'sf.connectingMachines': 'Connessione alle tue macchine…',
     'sf.connectingBody': 'Individuazione di progetti, coding agent installati e sessioni native. Un harness ACP può richiedere alcuni secondi per avviarsi.',
@@ -1518,6 +1968,48 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'settings.themeSystem': '跟隨系統',
     'settings.themeLight': '淺色',
     'settings.themeDark': '深色',
+    'settings.thisComputer': '這台電腦',
+    'settings.projectFolders': '專案資料夾',
+    'settings.projectFoldersHint': '選擇建立本機工作階段時可用的資料夾。若未列出資料夾，會使用您的家目錄。',
+    'settings.projectFoldersLoading': '正在載入專案資料夾…',
+    'settings.projectFoldersAdd': '新增資料夾…',
+    'settings.projectFoldersRemove': '移除',
+    'settings.projectFoldersOverride': '由 HARNESS_REMOTE_ROOT ({root}) 管理。這些資料夾為唯讀。',
+    'settings.projectFoldersError': '無法更新專案資料夾。',
+    'settings.remoteProjectFoldersHint': '專案資料夾屬於這台機器。請在該機器啟動 Harness Remote 時，使用 --root 設定其常駐程式。',
+    'machine.editTitle': '編輯機器',
+    'machine.localConnectionHint': '此電腦的連線設定由 Harness Remote 自動管理。',
+    'machine.foldersSaveHint': '資料夾變更僅在儲存後套用。重新啟動本機執行環境需要確認。',
+    'machine.foldersUnavailable': '這台機器未回報專案資料夾。',
+    'machine.saving': '儲存中…',
+    'machine.testFoldersHint': '測試連線以讀取這台機器的專案資料夾。',
+    'machine.managedByApp': '由 Harness Remote 管理',
+    'machine.folderPickerTitle': '新增專案資料夾',
+    'machine.restartTitle': '要重新啟動本機執行環境嗎？',
+    'machine.restartMessage': '變更專案資料夾會重新啟動本機執行環境。',
+    'machine.restartDetail': '這台電腦上執行中的工作階段都會中斷。請先等待本機工作階段完成再繼續。',
+    'machine.restartNow': '立即重新啟動',
+    'machine.foldersInvalid': '專案資料夾無效。',
+    'machine.folderPathInvalid': '專案資料夾路徑無效。',
+    'machine.folderMissing': '專案資料夾不存在或不是目錄。',
+    'machine.foldersBusy': '專案資料夾正在更新中。請稍後再試。',
+    'machine.foldersControlled': '專案資料夾由 HARNESS_REMOTE_ROOT 控制。',
+    'machine.folderPickerError': '無法開啟資料夾選擇器。',
+    'machine.networkPairingTitle': '手機配對',
+    'machine.networkPairingEnable': '允許區域網路上的手機與此電腦配對',
+    'machine.networkPairingHint': 'daemon 仍然受密碼保護，但會從你的網路可連線。如果系統詢問是否允許連入連線，請允許。變更此設定會重新啟動本機執行環境。',
+    'machine.networkPairingConfirmMessage': '要套用手機配對變更並重新啟動本機執行環境嗎？',
+    'machine.networkPairingConfirmDetail': '區域網路上的手機將可連線至此電腦的 daemon。daemon 仍然受密碼保護，配對仍需要一次性的配對碼。',
+    'machine.networkPairingConfirmDisableDetail': '區域網路上的手機將無法再連線至此電腦的 daemon。尚未使用的配對連結將停止運作。',
+    'machine.networkPairingError': '無法更新手機配對設定。',
+    'machine.runtimeBusy': '另一個本機執行環境變更正在進行中。請稍後再試。',
+    'machine.connectionInvalid': '機器連線無效。',
+    'machine.probeUnsupported': '不支援此機器設定檢查。',
+    'machine.connectionCheckFailed': '無法檢查此機器的連線。',
+    'machine.editorLabel': '機器設定',
+    'machine.agentRunning': '執行中',
+    'machine.agentReady': '就緒',
+    'machine.agentUnavailable': '無法使用',
     'sessions.title': '工作階段',
     'sessions.summary': '{total} 總數 · {active} 進行中 · {changed} 有變更',
     'sessions.new': '新增工作階段',
@@ -1572,7 +2064,10 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.send': '傳送',
     'detail.jumpToLatest': '前往最新',
     'detail.you': '👤 你',
-    'detail.opencode': '🤖 OpenCode',
+    'detail.opencode': '🤖 OpenCode Legacy',
+    'detail.opencode2': '🤖 OpenCode 2',
+    'detail.copilot': '🤖 GitHub Copilot CLI',
+    'detail.mimo': '🤖 MiMo Code',
     'detail.projectDashboardLabel': '專案與 VCS 儀表板',
     'detail.projectLabel': '專案',
     'detail.vcsLabel': 'VCS',
@@ -1664,11 +2159,14 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'connect.step.harness': 'Harness',
     'connect.step.address': '位址',
     'connect.step.credentials': '認證資訊',
-    'connect.harness.opencode': '直接連線到 OpenCode 伺服器。',
+    'connect.harness.opencode': '直接連線到 OpenCode Legacy 伺服器。',
+    'connect.harness.opencode2': '透過 ACP bridge 連線到 OpenCode 2。',
     'connect.harness.omp': '透過內附的 Oh My Pi bridge 連線。',
     'connect.harness.pi': '透過 ACP bridge 連線到 PI。',
     'connect.harness.claude': '透過 ACP bridge 連線到 Claude Code。',
     'connect.harness.codex': '透過 ACP bridge 連線到 Codex CLI。',
+    'connect.harness.copilot': '透過 ACP bridge 連線到 GitHub Copilot CLI。',
+    'connect.harness.mimo': '透過 ACP bridge 連線到 MiMo Code。',
     'connect.addressHint': '使用執行 harness 的電腦之區域網路位址。',
     'connect.runOnHost': '在主機上執行',
     'connect.copyCommand': '複製命令',
@@ -1763,6 +2261,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.machines': '機器',
     'sf.refresh': '重新整理',
     'sf.refreshingMachines': '正在重新整理機器',
+    'sf.hideSessionControls': '隱藏工作階段控制項',
+    'sf.showSessionControls': '顯示工作階段控制項',
     'sf.refreshingSessions': '正在重新整理工作階段',
     'sf.machineCount': '{online}/{total} 部機器',
     'sf.connecting': '連線中',
@@ -1802,6 +2302,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.noSessionsOnMachine': '在這部機器上找不到原生工作階段。',
     'sf.attentionCount': '{count} 需注意',
     'sf.liveCount': '{count} 進行中',
+    'sf.readyCount': '{count} 已就緒',
+    'sf.unseenResult': '新結果',
     'sf.offline': '離線',
     'sf.statusWorking': '執行中',
     'sf.statusReady': '就緒',
@@ -1824,6 +2326,78 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.noProjectAvailable': '所選機器上沒有可用的專案。',
     'sf.noAgentCanCreate': '這部機器上尚無已安裝的編碼代理能建立原生工作階段。',
     'sf.cancel': '取消',
+    'act.label': '代理活動',
+    'act.working': '工作中',
+    'act.worked': '已完成工作',
+    'act.workedFor': '工作了 {duration}',
+    'act.failed': '因錯誤而停止',
+    'act.thinking': '思考中…',
+    'act.writing': '撰寫中…',
+    'act.thought': '思考',
+    'act.thoughtFor': '思考了 {duration}',
+    'act.expandAll': '全部展開',
+    'act.collapseAll': '全部收合',
+    'act.collapse': '收合活動',
+    'act.showEarlier': '顯示前 {count} 個步驟',
+    'act.showEarlier.one': '顯示前 1 個步驟',
+    'act.steps': '{count} 個步驟',
+    'act.steps.one': '1 個步驟',
+    'act.outputTruncated': '僅顯示前 {count} 個字元。複製即可取得完整輸出。',
+    'act.status.failed': '失敗',
+    'act.status.incomplete': '無結果',
+    'act.count.run': '{count} 個指令',
+    'act.count.run.one': '1 個指令',
+    'act.count.read': '讀取 {count} 次',
+    'act.count.read.one': '讀取 1 次',
+    'act.count.edit': '編輯 {count} 次',
+    'act.count.edit.one': '編輯 1 次',
+    'act.count.search': '搜尋 {count} 次',
+    'act.count.search.one': '搜尋 1 次',
+    'act.count.web': '擷取網頁 {count} 次',
+    'act.count.web.one': '擷取網頁 1 次',
+    'act.count.task': '{count} 個子代理',
+    'act.count.task.one': '1 個子代理',
+    'act.count.todo': '更新計畫 {count} 次',
+    'act.count.todo.one': '更新計畫 1 次',
+    'act.count.tool': '{count} 個工具呼叫',
+    'act.count.tool.one': '1 個工具呼叫',
+    'act.verb.run.done': '執行',
+    'act.verb.run.live': '正在執行',
+    'act.verb.read.done': '讀取',
+    'act.verb.read.live': '正在讀取',
+    'act.verb.edit.done': '編輯',
+    'act.verb.edit.live': '正在編輯',
+    'act.verb.search.done': '搜尋',
+    'act.verb.search.live': '正在搜尋',
+    'act.verb.web.done': '擷取',
+    'act.verb.web.live': '正在擷取',
+    'act.verb.task.done': '委派',
+    'act.verb.task.live': '正在委派',
+    'act.verb.todo.done': '更新計畫',
+    'act.verb.todo.live': '正在更新計畫',
+    'settings.activityTitle': '對話活動',
+    'settings.activityHint': '代理在你的訊息與它的回覆之間所做的事：進度訊息、推理與執行的工具。變更會立即套用到已開啟的對話。',
+    'settings.activityLive': '代理工作時',
+    'settings.activityLive.latest': '顯示最新進度',
+    'settings.activityLive.highlights': '顯示所有進度',
+    'settings.activityLive.expanded': '顯示每個步驟',
+    'settings.activityLive.collapsed': '只顯示摘要列',
+    'settings.activityFinished': '回覆完成後',
+    'settings.activityFinished.collapsed': '收合成摘要列',
+    'settings.activityFinished.highlights': '保留進度訊息，隱藏步驟',
+    'settings.activityFinished.expanded': '保持所有步驟展開',
+    'settings.activityReasoning': '推理',
+    'settings.activityReasoning.collapsed': '收合為一行',
+    'settings.activityReasoning.expanded': '展開',
+    'settings.activityReasoning.hidden': '隱藏',
+    'ctx.undo': '復原',
+    'ctx.redo': '重做',
+    'ctx.cut': '剪下',
+    'ctx.copy': '複製',
+    'ctx.paste': '貼上',
+    'ctx.selectAll': '全選',
+    'ctx.copyLink': '複製連結網址',
+    'ctx.inspect': '檢查元素',
     'sf.createSession': '建立工作階段',
     'sf.creating': '建立中…',
     'sf.renameSession': '重新命名工作階段',
@@ -1837,6 +2411,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.renameSessionNamed': '重新命名工作階段：{title}',
     'sf.deleteSessionTitle': '要刪除「{title}」嗎？',
     'sf.deleteSubtitle': '這會從 {agent} 刪除原生工作階段，且無法從 Harness Remote 復原。',
+    'sf.hideSessionSubtitle': '這會在 Harness Remote 中隱藏工作階段。原生工作階段仍保留在 {agent}。',
     'sf.closeDelete': '關閉刪除工作階段',
     'sf.keepSession': '保留工作階段',
     'sf.deleteSession': '刪除工作階段',
@@ -1871,6 +2446,31 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.pairingFailed': '機器配對失敗。',
     'sf.qrPairingFailed': 'QR 配對失敗。',
     'sf.dismissPairingStatus': '關閉機器配對狀態',
+    'pair.action': '配對手機',
+    'pair.title': '配對手機',
+    'pair.subtitle': '用手機上的 Harness Remote 掃描此 QR 碼，即可新增 {name}。',
+    'pair.issuing': '正在準備配對碼…',
+    'pair.qrLabel': '機器配對 QR 碼',
+    'pair.qrUnavailable': '無法顯示配對碼。請重新產生後再試。',
+    'pair.address': '位址',
+    'pair.expiresIn': '{time} 後到期',
+    'pair.expiredTitle': '配對碼已過期',
+    'pair.expiredBody': '配對碼有效期為 5 分鐘。請重新產生以連接手機。',
+    'pair.regenerate': '重新產生配對碼',
+    'pair.replaceHint': '重新產生會立即取代先前的配對碼。',
+    'pair.claimedTitle': '手機已配對',
+    'pair.claimedBody': '{name} 現在已可在手機上的 Harness Remote 中使用。',
+    'pair.pairAnother': '配對另一支手機',
+    'pair.loopbackTitle': '手機無法連線到此機器',
+    'pair.loopbackBody': '此機器的 daemon 只接受本機連線。請將其設定為在區域網路上接聽並重新啟動，然後重新產生配對碼。',
+    'pair.loopbackLocalHint': '若要透過網路配對手機，請先在「設定」中啟用手機配對。',
+    'pair.loopbackLocalAction': '開啟「設定」',
+    'pair.unsupportedTitle': '此 daemon 尚未支援手機配對',
+    'pair.unsupportedBody': '請更新 {name} 上的 Harness Remote，然後再試。',
+    'pair.failedTitle': '無法取得配對碼',
+    'pair.noAddressTitle': '沒有手機可連線的位址',
+    'pair.noAddressBody': '此機器未回報可用於配對的網路位址。請檢查網路連線後再試。',
+    'pair.retry': '再試一次',
     'sf.preparing': '正在準備 Harness Remote',
     'sf.connectingMachines': '正在連線到你的機器…',
     'sf.connectingBody': '正在探索專案、已安裝的編碼代理與原生工作階段。ACP harness 可能需要幾秒鐘啟動。',
@@ -2002,6 +2602,48 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'settings.themeSystem': '跟随系统',
     'settings.themeLight': '浅色',
     'settings.themeDark': '深色',
+    'settings.thisComputer': '这台电脑',
+    'settings.projectFolders': '项目文件夹',
+    'settings.projectFoldersHint': '选择创建本地会话时可用的文件夹。未列出文件夹时，会使用您的主目录。',
+    'settings.projectFoldersLoading': '正在加载项目文件夹…',
+    'settings.projectFoldersAdd': '添加文件夹…',
+    'settings.projectFoldersRemove': '移除',
+    'settings.projectFoldersOverride': '由 HARNESS_REMOTE_ROOT ({root}) 管理。这些文件夹为只读。',
+    'settings.projectFoldersError': '无法更新项目文件夹。',
+    'settings.remoteProjectFoldersHint': '项目文件夹属于这台机器。请在该机器启动 Harness Remote 时，使用 --root 配置其守护进程。',
+    'machine.editTitle': '编辑机器',
+    'machine.localConnectionHint': '此电脑的连接设置由 Harness Remote 自动管理。',
+    'machine.foldersSaveHint': '文件夹变更仅在保存后应用。重启本地运行环境需要确认。',
+    'machine.foldersUnavailable': '这台机器未报告项目文件夹。',
+    'machine.saving': '保存中…',
+    'machine.testFoldersHint': '测试连接以读取这台机器的项目文件夹。',
+    'machine.managedByApp': '由 Harness Remote 管理',
+    'machine.folderPickerTitle': '添加项目文件夹',
+    'machine.restartTitle': '要重启本地运行环境吗？',
+    'machine.restartMessage': '更改项目文件夹会重启本地运行环境。',
+    'machine.restartDetail': '这台电脑上运行中的会话都会中断。请先等待本地会话完成再继续。',
+    'machine.restartNow': '立即重启',
+    'machine.foldersInvalid': '项目文件夹无效。',
+    'machine.folderPathInvalid': '项目文件夹路径无效。',
+    'machine.folderMissing': '项目文件夹不存在或不是目录。',
+    'machine.foldersBusy': '项目文件夹正在更新，请稍后重试。',
+    'machine.foldersControlled': '项目文件夹由 HARNESS_REMOTE_ROOT 控制。',
+    'machine.folderPickerError': '无法打开文件夹选择器。',
+    'machine.networkPairingTitle': '手机配对',
+    'machine.networkPairingEnable': '允许局域网上的手机与此电脑配对',
+    'machine.networkPairingHint': 'daemon 仍然受密码保护，但会从你的网络可连接。如果系统询问是否允许连入连接，请允许。更改此设置会重启本地运行环境。',
+    'machine.networkPairingConfirmMessage': '要应用手机配对更改并重启本地运行环境吗？',
+    'machine.networkPairingConfirmDetail': '局域网上的手机将可连接到此电脑的 daemon。daemon 仍然受密码保护，配对仍然需要一次性的配对码。',
+    'machine.networkPairingConfirmDisableDetail': '局域网上的手机将无法再连接到此电脑的 daemon。尚未使用的配对链接将停止工作。',
+    'machine.networkPairingError': '无法更新手机配对设置。',
+    'machine.runtimeBusy': '另一个本地运行环境更改正在进行中。请稍后再试。',
+    'machine.connectionInvalid': '机器连接无效。',
+    'machine.probeUnsupported': '不支持此机器配置检查。',
+    'machine.connectionCheckFailed': '无法检查此机器的连接。',
+    'machine.editorLabel': '机器配置',
+    'machine.agentRunning': '运行中',
+    'machine.agentReady': '就绪',
+    'machine.agentUnavailable': '不可用',
     'sessions.title': '会话',
     'sessions.summary': '{total} 总数 · {active} 进行中 · {changed} 有更改',
     'sessions.new': '新建会话',
@@ -2056,7 +2698,10 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.send': '发送',
     'detail.jumpToLatest': '前往最新',
     'detail.you': '👤 你',
-    'detail.opencode': '🤖 OpenCode',
+    'detail.opencode': '🤖 OpenCode Legacy',
+    'detail.opencode2': '🤖 OpenCode 2',
+    'detail.copilot': '🤖 GitHub Copilot CLI',
+    'detail.mimo': '🤖 MiMo Code',
     'detail.projectDashboardLabel': '项目与 VCS 仪表盘',
     'detail.projectLabel': '项目',
     'detail.vcsLabel': 'VCS',
@@ -2148,11 +2793,14 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'connect.step.harness': 'Harness',
     'connect.step.address': '地址',
     'connect.step.credentials': '凭据',
-    'connect.harness.opencode': '直接连接到 OpenCode 服务器。',
+    'connect.harness.opencode': '直接连接到 OpenCode Legacy 服务器。',
+    'connect.harness.opencode2': '通过 ACP 桥接器连接到 OpenCode 2。',
     'connect.harness.omp': '通过附带的 Oh My Pi 桥接器连接。',
     'connect.harness.pi': '通过 ACP 桥接器连接到 PI。',
     'connect.harness.claude': '通过 ACP 桥接器连接到 Claude Code。',
     'connect.harness.codex': '通过 ACP 桥接器连接到 Codex CLI。',
+    'connect.harness.copilot': '通过 ACP 桥接器连接到 GitHub Copilot CLI。',
+    'connect.harness.mimo': '通过 ACP 桥接器连接到 MiMo Code。',
     'connect.addressHint': '请使用运行 harness 的电脑的局域网地址。',
     'connect.runOnHost': '在主机上运行',
     'connect.copyCommand': '复制命令',
@@ -2247,6 +2895,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.machines': '机器',
     'sf.refresh': '刷新',
     'sf.refreshingMachines': '正在刷新机器',
+    'sf.hideSessionControls': '隐藏会话控件',
+    'sf.showSessionControls': '显示会话控件',
     'sf.refreshingSessions': '正在刷新会话',
     'sf.machineCount': '{online}/{total} 台机器',
     'sf.connecting': '连接中',
@@ -2286,6 +2936,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.noSessionsOnMachine': '在该机器上未发现原生会话。',
     'sf.attentionCount': '{count} 需注意',
     'sf.liveCount': '{count} 进行中',
+    'sf.readyCount': '{count} 已就绪',
+    'sf.unseenResult': '新结果',
     'sf.offline': '离线',
     'sf.statusWorking': '执行中',
     'sf.statusReady': '就绪',
@@ -2308,6 +2960,78 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.noProjectAvailable': '所选机器上没有可用的项目。',
     'sf.noAgentCanCreate': '该机器上尚无已安装的编码代理可以创建原生会话。',
     'sf.cancel': '取消',
+    'act.label': '代理活动',
+    'act.working': '工作中',
+    'act.worked': '已完成工作',
+    'act.workedFor': '工作了 {duration}',
+    'act.failed': '因错误而停止',
+    'act.thinking': '思考中…',
+    'act.writing': '撰写中…',
+    'act.thought': '思考',
+    'act.thoughtFor': '思考了 {duration}',
+    'act.expandAll': '全部展开',
+    'act.collapseAll': '全部收起',
+    'act.collapse': '收起活动',
+    'act.showEarlier': '显示前 {count} 个步骤',
+    'act.showEarlier.one': '显示前 1 个步骤',
+    'act.steps': '{count} 个步骤',
+    'act.steps.one': '1 个步骤',
+    'act.outputTruncated': '仅显示前 {count} 个字符。复制即可获取完整输出。',
+    'act.status.failed': '失败',
+    'act.status.incomplete': '无结果',
+    'act.count.run': '{count} 个命令',
+    'act.count.run.one': '1 个命令',
+    'act.count.read': '读取 {count} 次',
+    'act.count.read.one': '读取 1 次',
+    'act.count.edit': '编辑 {count} 次',
+    'act.count.edit.one': '编辑 1 次',
+    'act.count.search': '搜索 {count} 次',
+    'act.count.search.one': '搜索 1 次',
+    'act.count.web': '抓取网页 {count} 次',
+    'act.count.web.one': '抓取网页 1 次',
+    'act.count.task': '{count} 个子代理',
+    'act.count.task.one': '1 个子代理',
+    'act.count.todo': '更新计划 {count} 次',
+    'act.count.todo.one': '更新计划 1 次',
+    'act.count.tool': '{count} 个工具调用',
+    'act.count.tool.one': '1 个工具调用',
+    'act.verb.run.done': '执行',
+    'act.verb.run.live': '正在执行',
+    'act.verb.read.done': '读取',
+    'act.verb.read.live': '正在读取',
+    'act.verb.edit.done': '编辑',
+    'act.verb.edit.live': '正在编辑',
+    'act.verb.search.done': '搜索',
+    'act.verb.search.live': '正在搜索',
+    'act.verb.web.done': '抓取',
+    'act.verb.web.live': '正在抓取',
+    'act.verb.task.done': '委派',
+    'act.verb.task.live': '正在委派',
+    'act.verb.todo.done': '更新计划',
+    'act.verb.todo.live': '正在更新计划',
+    'settings.activityTitle': '对话活动',
+    'settings.activityHint': '代理在你的消息与它的回复之间所做的事：进度消息、推理与运行的工具。更改会立即应用到已打开的对话。',
+    'settings.activityLive': '代理工作时',
+    'settings.activityLive.latest': '显示最新进度',
+    'settings.activityLive.highlights': '显示所有进度',
+    'settings.activityLive.expanded': '显示每个步骤',
+    'settings.activityLive.collapsed': '只显示摘要行',
+    'settings.activityFinished': '回复完成后',
+    'settings.activityFinished.collapsed': '收起为摘要行',
+    'settings.activityFinished.highlights': '保留进度消息，隐藏步骤',
+    'settings.activityFinished.expanded': '保持所有步骤展开',
+    'settings.activityReasoning': '推理',
+    'settings.activityReasoning.collapsed': '收起为一行',
+    'settings.activityReasoning.expanded': '展开',
+    'settings.activityReasoning.hidden': '隐藏',
+    'ctx.undo': '撤销',
+    'ctx.redo': '重做',
+    'ctx.cut': '剪切',
+    'ctx.copy': '复制',
+    'ctx.paste': '粘贴',
+    'ctx.selectAll': '全选',
+    'ctx.copyLink': '复制链接地址',
+    'ctx.inspect': '检查元素',
     'sf.createSession': '创建会话',
     'sf.creating': '创建中…',
     'sf.renameSession': '重命名会话',
@@ -2321,6 +3045,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.renameSessionNamed': '重命名会话：{title}',
     'sf.deleteSessionTitle': '要删除“{title}”吗？',
     'sf.deleteSubtitle': '这会从 {agent} 删除原生会话，且无法从 Harness Remote 撤销。',
+    'sf.hideSessionSubtitle': '这会在 Harness Remote 中隐藏会话。原生会话仍保留在 {agent}。',
     'sf.closeDelete': '关闭删除会话',
     'sf.keepSession': '保留会话',
     'sf.deleteSession': '删除会话',
@@ -2355,6 +3080,31 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.pairingFailed': '机器配对失败。',
     'sf.qrPairingFailed': '二维码配对失败。',
     'sf.dismissPairingStatus': '关闭机器配对状态',
+    'pair.action': '配对手机',
+    'pair.title': '配对手机',
+    'pair.subtitle': '用手机上的 Harness Remote 扫描此二维码，即可添加 {name}。',
+    'pair.issuing': '正在准备配对码…',
+    'pair.qrLabel': '机器配对二维码',
+    'pair.qrUnavailable': '无法显示配对码。请重新生成后再试。',
+    'pair.address': '地址',
+    'pair.expiresIn': '{time} 后过期',
+    'pair.expiredTitle': '配对码已过期',
+    'pair.expiredBody': '配对码有效期为 5 分钟。请重新生成以连接手机。',
+    'pair.regenerate': '重新生成配对码',
+    'pair.replaceHint': '重新生成会立即替换之前的配对码。',
+    'pair.claimedTitle': '手机已配对',
+    'pair.claimedBody': '{name} 现在可在手机上的 Harness Remote 中使用。',
+    'pair.pairAnother': '配对另一部手机',
+    'pair.loopbackTitle': '手机无法连接到此机器',
+    'pair.loopbackBody': '此机器的 daemon 只接受本地连接。请将其配置为在局域网上监听并重新启动，然后重新生成配对码。',
+    'pair.loopbackLocalHint': '若要通过网络配对手机，请先在“设置”中启用手机配对。',
+    'pair.loopbackLocalAction': '打开“设置”',
+    'pair.unsupportedTitle': '此 daemon 尚不支持手机配对',
+    'pair.unsupportedBody': '请更新 {name} 上的 Harness Remote，然后再试。',
+    'pair.failedTitle': '无法获取配对码',
+    'pair.noAddressTitle': '没有手机可连接的地址',
+    'pair.noAddressBody': '此机器未报告可用于配对的网络地址。请检查网络连接后重试。',
+    'pair.retry': '重试',
     'sf.preparing': '正在准备 Harness Remote',
     'sf.connectingMachines': '正在连接你的机器…',
     'sf.connectingBody': '正在发现项目、已安装的编码代理和原生会话。ACP harness 可能需要几秒钟启动。',

@@ -17,7 +17,8 @@ each harness.
 
 | Harness | Status | How it connects |
 |---|---|---|
-| [OpenCode](https://github.com/sst/opencode) | supported | directly to the OpenCode HTTP server |
+| [OpenCode 2](https://opencode.ai/v2/docs/) | integration validation in progress | native ACP through the `opencode2` bridge backend |
+| [OpenCode Legacy (v1)](https://opencode.ai/docs/) | supported | directly to the OpenCode v1 HTTP server |
 | [Oh My Pi (OMP)](https://omp.sh/) | supported | through the local bridge included in this repository |
 | [PI](https://pi.dev/) | supported | through the local ACP bridge and the [`@automatalabs/pi-acp`](https://www.npmjs.com/package/@automatalabs/pi-acp) adapter |
 | [Claude Code](https://code.claude.com/) | supported | through the local ACP bridge and the [`@agentclientprotocol/claude-agent-acp`](https://www.npmjs.com/package/@agentclientprotocol/claude-agent-acp) adapter |
@@ -62,9 +63,13 @@ offering a control that fails.
 - browse and monitor sessions (`idle`, `busy`, `retry`, `waiting`) — a session a harness reports as
   waiting, on a subagent for instance, reads as working rather than idle, and carries its own marker
   on a wide screen
-- open a session and read messages and progress, thinking and tool calls included, each as its own
-  step rather than folded into the reply
-- copy a message: right-click it, or long-press on a phone, for its text or its markdown
+- open a session and read messages and progress: each reply keeps the agent's work in one Activity
+  section above the answer — its own progress notes, its reasoning, and one compact row per tool call
+  that opens to show the command, the diff or the output. **Settings → Conversation activity**
+  chooses how much of it stays visible while the agent works (its latest update, all its updates,
+  every step, or just a summary line) and after it answers, and whether reasoning is shown
+- copy a message or a code block with its copy button, or select any text and copy it; in the
+  desktop app right-click offers Copy, Paste and Select all as a browser does
 - send prompts from the chat input, including a follow-up typed while the agent is still working
 - stop running work when necessary
 - pick the model a session uses
@@ -214,6 +219,9 @@ published as an installable [PWA](#progressive-web-app-pwa).
 
 ### OpenCode Server Setup
 
+This section describes **OpenCode Legacy (v1)**. The official OpenCode 2
+integration uses ACP; see [OpenCode 2 validation](docs/OPENCODE2_VALIDATION.md).
+
 Start the OpenCode server with network access and Basic Auth.
 
 macOS / Linux (bash/zsh):
@@ -356,6 +364,12 @@ Native app builds need no CORS configuration. To use the app from a browser inst
 npx --yes ./bridge --port 4097 --username omp --password "…" --root "$HOME/Software" \
   --cors http://localhost:5173
 ```
+
+#### Harness diagnostics
+
+ACP adapters write all their diagnostics to stderr, because stdout carries the protocol. The bridge, the daemon and the launcher forward to the terminal only the lines that look like failures (`error`, `TypeError`, `failed`, `fatal`, `ENOENT`, …), always prefixed with the harness id, e.g. `[claude]`. Adapter traces such as Claude's `[session/replay]` timings, and its `Unexpected case:` lines for SDK events it does not recognise yet, stay hidden: the adapter skips those events and the session continues. Exit reasons and startup failures are always reported.
+
+Pass `--verbose` or set `HARNESS_REMOTE_VERBOSE=1` to forward the full stderr stream of every harness, including managed OpenCode. On the standalone bridge it also logs each granted tool permission and each handled agent request.
 
 #### Live synchronization scope
 
@@ -518,7 +532,7 @@ npx --yes ./bridge \
   --root "$HOME/Software"
 ```
 
-The `codex` backend defaults to `npx -y @agentclientprotocol/codex-acp@1.1.14` and authenticates
+The `codex` backend defaults to `npx -y @agentclientprotocol/codex-acp@1.13.1` and authenticates
 through the adapter's ChatGPT method, so a `codex login` on the host machine is what the bridge
 uses — an `OPENAI_API_KEY` environment variable works too, but is not required and is not preferred.
 The version is pinned to avoid the same `notarget` issue that motivated pinning the PI adapter. Use
