@@ -11,6 +11,7 @@ const HARNESS_ICON_FILES: Record<string, string> = {
   codex: "codex.svg",
   claude: "claude.svg",
   opencode: "opencode.svg",
+  opencode2: "opencode.svg",
   omp: "omp.svg",
   pi: "pi.svg"
 }
@@ -25,6 +26,8 @@ const NEAR_BOTTOM_PX = 96
 const COMPOSER_MAX_HEIGHT_PX = 180
 const JUMP_AFFORDANCE_MAX_THRESHOLD = 320
 const JUMP_AFFORDANCE_MIN_RANGE = 240
+/** Where the live tail sits while a turn runs, as a fraction of the transcript height from the top. */
+const LIVE_TAIL_POSITION = 0.5
 
 type Props = {
   messages: MessageEnvelope[]
@@ -76,6 +79,17 @@ function formatClock(timestamp: number): string {
 
 function hasTouchFirstPointer(): boolean {
   return typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches === true
+}
+
+/**
+ * Size the room kept under a live turn so that, followed to the bottom, its newest line sits at
+ * LIVE_TAIL_POSITION of the transcript instead of against the composer. What the agent writes next
+ * then appears in open space, as in Claude and Codex.
+ */
+function sizeLiveRoom(transcript: HTMLElement, spacer: HTMLElement) {
+  const paddingBottom = Number.parseFloat(window.getComputedStyle(transcript).paddingBottom) || 0
+  const room = Math.max(0, Math.round(transcript.clientHeight * (1 - LIVE_TAIL_POSITION) - paddingBottom))
+  spacer.style.height = `${room}px`
 }
 
 function jumpAffordancesFor(element: HTMLElement): JumpAffordances {
@@ -184,6 +198,11 @@ const ConversationTranscript = memo(function ConversationTranscript({
   const followFrameRef = useRef<number | undefined>(undefined)
   const scrollFrameRef = useRef<number | undefined>(undefined)
   const previousSendingRef = useRef(false)
+  const spacerRef = useRef<HTMLDivElement>(null)
+  // Once a turn has run in this transcript it keeps its live room, including after the turn ends:
+  // dropping the room at completion would yank the finished reply down against the composer.
+  const liveRoomRef = useRef(false)
+  const liveRef = useRef(false)
   const [jumpAffordances, setJumpAffordances] = useState<JumpAffordances>({ top: false, bottom: false })
   loadOlderRef.current = onLoadOlder
 
@@ -192,10 +211,57 @@ const ConversationTranscript = memo(function ConversationTranscript({
     setJumpAffordances((current) => current.top === next.top && current.bottom === next.bottom ? current : next)
   }
 
+  function openLiveRoom(current: HTMLElement) {
+    liveRoomRef.current = true
+    if (spacerRef.current) sizeLiveRoom(current, spacerRef.current)
+  }
+
   useEffect(() => () => {
     if (followFrameRef.current !== undefined) window.cancelAnimationFrame(followFrameRef.current)
     if (scrollFrameRef.current !== undefined) window.cancelAnimationFrame(scrollFrameRef.current)
   }, [])
+
+  liveRef.current = sending || waiting
+
+  // A reply keeps growing after the frame that followed it: message content renders after the
+  // envelope arrives, and the transcript itself resizes with the window, the composer and a soft
+  // keyboard. Re-settle on those too, or the newest lines end up under the composer. Outside a live
+  // turn this only resizes the live room, so expanding an old tool card never moves the view.
+  useEffect(() => {
+    const transcript = transcriptRef.current
+    if (!transcript) return
+    let frame: number | undefined
+    const settle = () => {
+      if (frame !== undefined) return
+      frame = window.requestAnimationFrame(() => {
+        frame = undefined
+        if (preservingOlderRef.current) return
+        if (liveRoomRef.current && spacerRef.current) sizeLiveRoom(transcript, spacerRef.current)
+        if (nearBottomRef.current && liveRef.current) transcript.scrollTop = transcript.scrollHeight
+        else if (!liveRoomRef.current) return
+        refreshJumpAffordances(transcript)
+      })
+    }
+    const resizes = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(settle)
+    resizes?.observe(transcript)
+    const mutations = typeof MutationObserver === "undefined" ? undefined : new MutationObserver(settle)
+    mutations?.observe(transcript, { childList: true, subtree: true, characterData: true })
+    return () => {
+      resizes?.disconnect()
+      mutations?.disconnect()
+      if (frame !== undefined) window.cancelAnimationFrame(frame)
+    }
+  }, [])
+
+  // A live turn - just sent, or already working when the Session opened - leaves its tail halfway up
+  // the transcript, with room below for what comes next. Declared before the follow effect so the
+  // room exists when that effect pins the tail. Opening the room adds space below the content and
+  // moves nothing by itself.
+  useEffect(() => {
+    const transcript = transcriptRef.current
+    if (!transcript || loading || !ready || liveRoomRef.current || !(sending || waiting)) return
+    openLiveRoom(transcript)
+  }, [loading, ready, sending, waiting])
 
   useEffect(() => {
     const transcript = transcriptRef.current
@@ -347,6 +413,7 @@ const ConversationTranscript = memo(function ConversationTranscript({
           </>
         )}
         {sending || (waiting && showWaitingIndicator) ? <ThinkingIndicator agentLabel={agentLabel} agentBackend={agentBackend} workingLabel={workingLabel} /> : null}
+        <div className="uw-transcript-reply-room" ref={spacerRef} aria-hidden="true" />
       </div>
 
       {jumpAffordances.top || jumpAffordances.bottom ? (

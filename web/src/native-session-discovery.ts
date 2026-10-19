@@ -69,8 +69,8 @@ export type NativeSessionSurfaceTarget = {
   external: boolean
   modelsSupported: boolean
   commandsSupported?: boolean
-  /** Native metadata mutations are exposed by the owning harness contract. The chat header shows
-   * Rename/Delete only for a Session whose harness actually implements them. */
+  /** Session metadata actions supported by the owning bridge. ACP can persist a local name and
+   * hide a Session even when the native protocol has no rename/delete operation. */
   renameSupported: boolean
   deleteSupported: boolean
   model: ModelSelection | null
@@ -97,7 +97,7 @@ export type NativeSessionSurfaceTarget = {
 }
 
 function supportedBackend(value: string, fallback: BackendKind): BackendKind {
-  return value === "opencode" || value === "omp" || value === "pi" || value === "claude" || value === "codex"
+  return value === "opencode" || value === "opencode2" || value === "omp" || value === "pi" || value === "claude" || value === "codex" || value === "copilot" || value === "mimo"
     ? value
     : fallback
 }

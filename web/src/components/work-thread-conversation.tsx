@@ -1,11 +1,13 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { api } from "../api"
 import type { AttachmentPart } from "../attachments"
 import { createCoalescedTailRefresh } from "../coalesced-tail-refresh"
 import type { ConversationController } from "../conversation-controller"
 import { conversationTurnSessionID, conversationTurns, type ConversationRuntime, type ConversationTurn } from "../conversation-runtime"
 import { mergeLatestMessagePage, prependOlderMessagePage } from "../message-pages"
-import type { NativeSessionRouteContinueInput, NativeSessionRouteMachine } from "../native-session-routing"
+import { isMachineTransportFailure as isTransportFailure } from "../machine-request-error"
+import { provenCopilotAutoDefault, shouldClearDeferredCatalogDefault } from "../native-session-model"
+import { nativeSessionRouteChanged, type NativeSessionRouteContinueInput, type NativeSessionRouteMachine } from "../native-session-routing"
 import type { SavedServerProfile } from "../serverProfiles"
 import { taskClient, type AgentModelScope } from "../taskClient"
 import { startTaskDeskSessionLiveRefresh } from "../taskdesk-session-live-refresh"
@@ -47,6 +49,7 @@ const HARNESS_ICON_FILES: Record<string, string> = {
   codex: "codex.svg",
   claude: "claude.svg",
   opencode: "opencode.svg",
+  opencode2: "opencode.svg",
   omp: "omp.svg",
   pi: "pi.svg"
 }
@@ -103,11 +106,8 @@ type Props = {
     machines: NativeSessionRouteMachine[]
     onContinue: (input: NativeSessionRouteContinueInput) => Promise<void>
   }
-}
-
-function isTransportFailure(reason: unknown): boolean {
-  const message = reason instanceof Error ? reason.message : String(reason)
-  return /cannot reach|timed out|network|connection|failed to fetch/i.test(message)
+  /** Session-level context that shares the toolbar row instead of claiming a row of its own. */
+  toolbarAccessory?: ReactNode
 }
 
 function assistantMessageHasSignal(message: WorkThreadMessage): boolean {
@@ -124,7 +124,7 @@ function assistantMessageHasSignal(message: WorkThreadMessage): boolean {
 }
 
 function supportedBackend(value: string, fallback: BackendKind): BackendKind {
-  return value === "opencode" || value === "omp" || value === "pi" || value === "claude" || value === "codex"
+  return value === "opencode" || value === "opencode2" || value === "omp" || value === "pi" || value === "claude" || value === "codex" || value === "copilot" || value === "mimo"
     ? value
     : fallback
 }
@@ -162,6 +162,17 @@ function isActive(conversation: ConversationRuntime): boolean {
 
 function modelKey(model?: ModelSelection | null): string {
   return model ? modelOptionKey(model as ModelOption) : ""
+}
+
+export function modelForCurrentDestination(
+  model: ModelSelection | null,
+  current: { agentID: string; backend?: string },
+  destination: { agentID: string; backend?: string },
+  sameMachine: boolean
+): ModelSelection | null {
+  return model && sameMachine && current.agentID === destination.agentID && current.backend === destination.backend
+    ? model
+    : null
 }
 
 function lastModelForAgent(conversation: ConversationRuntime, agentID: string): ModelSelection | null {
@@ -249,7 +260,7 @@ function conversationOutcome(status: string): { state: "attention" | "stopped"; 
   return null
 }
 
-function ConversationStatePill({
+export function ConversationStatePill({
   working,
   attention,
   workingLabel,
@@ -325,7 +336,8 @@ export function WorkThreadConversation({
   transcriptRefreshToken = 0,
   interactionEnabled = true,
   onConnectionIssue,
-  routing
+  routing,
+  toolbarAccessory
 }: Props) {
   const draftStorageKey = `${DRAFT_STORAGE_PREFIX}${conversation.id}`
   const initialAgentID = agentForTurn(conversation, conversation.currentTurn)
@@ -369,6 +381,7 @@ export function WorkThreadConversation({
   const draftRef = useRef(draft)
   draftRef.current = draft
   const targetAgentIDRef = useRef(targetAgentID)
+  const routeSelectionTouchedRef = useRef(false)
   const observedConversationModelKeyRef = useRef(initialModelKey)
   const modelSelectionTouchedRef = useRef(false)
   const sendInFlightRef = useRef(false)
@@ -403,7 +416,19 @@ export function WorkThreadConversation({
   const selectedRouteMachine = routing?.machines.find((machine) => machine.machineID === targetMachineID)
   const destinationAgents = routing ? (selectedRouteMachine?.agents || []) : agents
   const destinationConfig = selectedRouteMachine?.config || baseConfig
-  const routeChanged = Boolean(routing && targetAgentID !== currentAgentID)
+  const destinationAgent = destinationAgents.find((agent) => agent.id === targetAgentID)
+  const currentModelForPicker = modelForCurrentDestination(
+    lastModelForAgent(conversation, currentAgentID),
+    { agentID: currentAgentID, backend: currentAgent?.backend },
+    { agentID: targetAgentID, backend: destinationAgent?.backend },
+    !routing || targetMachineID === routing.currentMachineID
+  )
+  const routeChanged = nativeSessionRouteChanged(
+    routing,
+    routeSelectionTouchedRef.current,
+    targetAgentID,
+    currentAgentID
+  )
   const routeAgentLabel = agentLabel(destinationAgents, targetAgentID)
   const routingSignature = routing
     ? routing.machines.map((machine) => `${machine.machineID}:${machine.agents.map((agent) => `${agent.id}:${agent.backend}`).join(",")}`).join("|")
@@ -452,6 +477,7 @@ export function WorkThreadConversation({
     setReplyPending(false)
     setTargetMachineID(routing?.currentMachineID || "")
     setTargetAgentID(currentAgentID)
+    routeSelectionTouchedRef.current = false
     setTargetModelKey(currentConversationModelKey)
     observedConversationModelKeyRef.current = currentConversationModelKey
     modelSelectionTouchedRef.current = false
@@ -465,6 +491,7 @@ export function WorkThreadConversation({
     if (currentAgentID !== targetAgentIDRef.current && conversation.currentTurn?.id) {
       const nextModelKey = modelKey(conversation.currentTurn.model ?? lastModelForAgent(conversation, currentAgentID))
       setTargetAgentID(currentAgentID)
+      routeSelectionTouchedRef.current = false
       setTargetModelKey(nextModelKey)
       observedConversationModelKeyRef.current = nextModelKey
       modelSelectionTouchedRef.current = false
@@ -817,7 +844,7 @@ export function WorkThreadConversation({
       const mayUseCatalogDefault = !deferModelFallback || routeChanged || !latestHasUserPrompt
       const fallback = mayUseCatalogDefault
         ? catalog.models.find((model) => model.isDefault) || catalog.models[0]
-        : undefined
+        : latestHasUserPrompt ? provenCopilotAutoDefault(destinationAgent?.backend, catalog.models) || undefined : undefined
       const chosen = catalog.models.find((model) => modelKey(model) === priorKey) || fallback
       setTargetModelKey((currentKey) => {
         if (modelSelectionTouchedRef.current && catalog.models.some((model) => modelKey(model) === currentKey)) return currentKey
@@ -839,10 +866,18 @@ export function WorkThreadConversation({
   // Do not re-read the catalog just for that transition: drop only the untouched provisional default
   // and leave explicit user choices and verified native model metadata alone.
   useEffect(() => {
-    if (!deferModelFallback || routeChanged || !conversationHasUserPrompt || currentConversationModelKey) return
-    if (modelSelectionTouchedRef.current) return
+    if (!shouldClearDeferredCatalogDefault({
+      deferModelFallback,
+      routeChanged,
+      hasUserPrompt: conversationHasUserPrompt,
+      currentModelKey: currentConversationModelKey,
+      selectionTouched: modelSelectionTouchedRef.current,
+      selectedModelKey: targetModelKey,
+      models,
+      backend: destinationAgent?.backend
+    })) return
     setTargetModelKey("")
-  }, [deferModelFallback, routeChanged, conversationHasUserPrompt, currentConversationModelKey])
+  }, [deferModelFallback, routeChanged, conversationHasUserPrompt, currentConversationModelKey, models, targetModelKey, destinationAgent?.backend])
 
   // Only a model verified by the current live catalog is sent explicitly. A null selection is
   // intentional: the controller distinguishes it from an omitted field, which means reuse the
@@ -1029,7 +1064,7 @@ export function WorkThreadConversation({
       ? `${pendingAgentLabel} is getting started`
       : `${currentLabel} is working`
   const conversationStateLabel = modelBootstrapBlocked
-    ? modelsLoading ? "Loading models" : "Waiting for model catalog"
+    ? modelsLoading ? "Loading models" : modelError ? "Model catalog unavailable" : "Waiting for model catalog"
     : waitingLabel
 
   /**
@@ -1058,6 +1093,7 @@ export function WorkThreadConversation({
             <select value={targetAgentID} disabled={!interactionEnabled || working || replyPending || sending || modelBootstrapBlocked || destinationAgents.length === 0} onChange={(event) => {
               modelGeneration.current += 1
               modelSelectionTouchedRef.current = false
+              routeSelectionTouchedRef.current = event.target.value !== currentAgentID
               setModels([])
               setModelError(null)
               setTargetModelKey("")
@@ -1068,14 +1104,15 @@ export function WorkThreadConversation({
           </label>
           <label className="tdw-model-control">
             <span>Model</span>
-            <ModelPicker compact models={models} value={targetModelKey} onChange={(value) => {
+            <ModelPicker compact models={models} value={targetModelKey} currentModel={currentModelForPicker} onChange={(value) => {
               modelSelectionTouchedRef.current = true
               setTargetModelKey(value)
             }} disabled={!interactionEnabled || working || replyPending || sending || modelsLoading || !targetAgentID} loading={modelsLoading} placeholder={modelBootstrapBlocked ? (modelError ? "Model unavailable" : "Loading models…") : deferModelFallback ? "Harness default" : undefined} unavailableHint={modelError || undefined} />
             {modelError ? <small className="tdw-field-note" title={modelError}>Model catalog unavailable. Sending is paused until a model can be verified.</small> : null}
           </label>
         </div>
-        <ConversationStatePill working={working || replyPending || sending || replySettling || modelBootstrapBlocked} attention={hasAttention} workingLabel={conversationStateLabel} startedAt={sending ? undefined : conversation.currentTurn?.startedAt} status={conversation.status} detail={conversation.error?.message || undefined} />
+        {toolbarAccessory}
+        <ConversationStatePill working={working || replyPending || sending || replySettling || modelBootstrapBlocked} attention={hasAttention} workingLabel={conversationStateLabel} startedAt={sending || modelBootstrapBlocked ? undefined : conversation.currentTurn?.startedAt} status={conversation.status} detail={conversation.error?.message || undefined} />
       </div>
 
       {routeChanged ? (
