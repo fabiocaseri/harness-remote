@@ -164,12 +164,17 @@ function providersResponse(models, fallbackProviderID) {
     const modelID = flat ? value : value.slice(separator + 1)
     if (!providerID || !modelID) continue
     const provider = providers.get(providerID) ?? { id: providerID, name: providerID, models: {} }
-    provider.models[modelID] = {
+    const model = provider.models[modelID] ?? {
       id: modelID,
       name: option.name ?? modelID,
       description: option.description || undefined,
       status: "active"
     }
+    if (option.variant) {
+      model.variants ??= {}
+      model.variants[option.variant] = { value: option.variantValue ?? option.variant }
+    }
+    provider.models[modelID] = model
     providers.set(providerID, provider)
     if (option.currentValue) defaults[providerID] = modelID
   }
@@ -182,11 +187,19 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
   const serviceAcp = new AcpPromptEchoFilter(acp)
   const service = new AcpService(serviceAcp, {
     ...serviceOptions,
+    requireExistingDirectory: profile.requireExistingDirectory,
     actionProviders: profile.actionProviders,
     preferListedTitles: profile.preferListedTitles,
     nativeRenameCommand: profile.nativeRenameCommand,
     journalPageWhileOwned: profile.journalPageWhileOwned !== false,
-    modelVariantConfigIDs: profile.modelVariantConfigIDs ?? []
+    replayAuthoritative: profile.replayAuthoritative === true,
+    modelVariantConfigIDs: profile.modelVariantConfigIDs ?? [],
+    modelProviderID: profile.id,
+    excludedModelValuePrefixes: profile.excludedModelValuePrefixes ?? [],
+    inlineModelVariantValues: profile.inlineModelVariantValues ?? [],
+    modelProviderOrder: profile.modelProviderOrder ?? [],
+    requireAssistantResponse: profile.requireAssistantResponse === true,
+    recoverMissingSessionOnPrompt: profile.recoverMissingSessionOnPrompt === true
   })
   const hiddenSessionIDs = serviceOptions?.hiddenSessionIDs
   const liveSessionActivity = new Map()
@@ -231,13 +244,14 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
   // its transcript. Invalid or missing harness timestamps stay at zero instead of pretending to be
   // freshly updated on every poll.
   const listVisibleSessionMetadata = async (directory, cursor) => {
-    const [page, deletedSessionIDs] = await Promise.all([
+    const [page, deletedSessionIDs, titleOverrides] = await Promise.all([
       typeof acp.listSessionPage === "function"
         ? acp.listSessionPage(cursor)
         : cursor
           ? { sessions: [] }
           : acp.listSessions().then((sessions) => ({ sessions })),
-      service.deletedSessionIDs()
+      service.deletedSessionIDs(),
+      service.titleOverrides()
     ])
     service.rememberListedSessions(page.sessions)
     const visible = new Map(
@@ -254,7 +268,7 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
             publicSessionStatus(session.sessionId, Math.max(liveUpdatedAt, listedTimestamp)),
             liveUpdatedAt
           )
-          return [view.id, view]
+          return [view.id, titleOverrides.has(view.id) ? { ...view, title: titleOverrides.get(view.id) } : view]
         })
     )
 

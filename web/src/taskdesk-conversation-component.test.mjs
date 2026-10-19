@@ -110,3 +110,20 @@ test("accepted native replies keep settling after an early idle edge", () => {
 test("selected ACP lifecycle edges always re-read the mounted transcript", () => {
   assert.match(liveRefresh, /event\.type === "session\.updated"[\s\S]*selectedEvent[\s\S]*throttle\("message", 120, onMessage\)[\s\S]*settleAfterLifecycle\(\)/)
 })
+
+test("a live turn keeps its tail halfway up the transcript, after a Send or on opening", () => {
+  assert.match(component, /const LIVE_TAIL_POSITION = 0\.5/)
+  assert.match(component, /function sizeLiveRoom\(transcript: HTMLElement, spacer: HTMLElement\)/)
+  assert.match(component, /className="uw-transcript-reply-room" ref=\{spacerRef\}/)
+  // Sending and an already-working Session both open the room; the user scrolling up still wins.
+  assert.match(component, /liveRoomRef\.current \|\| !\(sending \|\| waiting\)\) return\s+openLiveRoom\(transcript\)\s+\}, \[loading, ready, sending, waiting\]\)/)
+  assert.match(component, /if \(event\.deltaY < 0\) nearBottomRef\.current = false/)
+  assert.doesNotMatch(component, /sizeSendAnchor|pinnedRef/)
+})
+
+test("a wide Session pane shows the outcome as a toolbar chip, a phone keeps its own row", () => {
+  assert.match(controller, /toolbarAccessory\?: ReactNode/)
+  assert.match(controller, /\{toolbarAccessory\}\s+<ConversationStatePill/)
+  assert.match(observer, /\{compactLayout \? outcomePanel : null\}/)
+  assert.match(observer, /toolbarAccessory=\{compactLayout \? undefined : outcomePanel\}/)
+})
