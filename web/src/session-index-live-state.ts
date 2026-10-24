@@ -131,12 +131,30 @@ export function clearSessionIndexLiveState(
   if (deleteSessionState(endpointKey(config), sessionID)) invalidateSessionIndex()
 }
 
+/**
+ * Drop every transient busy/idle/retry status at once so the next Session-index read speaks for
+ * native truth. A foregrounded phone may have slept through the terminal edge of a long turn: its
+ * last streamed status is a bridge across a short event/index race, not a claim about a Session that
+ * finished minutes ago, and the status cache would otherwise outvote the fresh index for its grace.
+ * Terminal errors are deliberately left in place - they outlive navigation until durable truth
+ * catches up, exactly like a stream reconnect.
+ */
+export function clearSessionIndexLiveStatuses(): void {
+  if (liveStatuses.size === 0) return
+  liveStatuses.clear()
+  invalidateSessionIndex()
+}
+
 export function noteSessionIndexLiveEvent(
   config: SessionIndexConfig,
   event: LiveEvent,
   now = Date.now()
 ): void {
+  // The message.updated carve-out above is OpenCode's turn-boundary metadata. An ACP bridge emits
+  // message.updated for every streamed chunk and marks every lifecycle edge with session.updated, so
+  // letting it through would re-read every agent's Session index once per token.
   const invalidates = sessionIndexLifecycleEvent(event.type)
+    && (event.type !== "message.updated" || config.backend === "opencode")
   if (!event.sessionID) {
     if (invalidates) invalidateSessionIndex()
     return
