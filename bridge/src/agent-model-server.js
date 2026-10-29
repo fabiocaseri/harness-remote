@@ -1,6 +1,6 @@
 import http from "node:http"
-import { allowedOrigin, applyCorsHeaders, matchesCredentials, writeJSON } from "./http-policy.js"
-import { announceMachinePairing, createOneTimePairingGrant, createPairingServer } from "./pairing-server.js"
+import { allowedOrigin, applyCorsHeaders, matchesCredentials, guardRequestHandler, writeJSON } from "./http-policy.js"
+import { announceMachinePairing, MachinePairingGrants, createPairingServer } from "./pairing-server.js"
 
 const MODEL_ROUTE = /^\/v1\/agents\/([^/]+)\/models$/
 const TASK_LAUNCH_ROUTE = /^\/v1\/tasks\/([^/]+)\/launch$/
@@ -48,7 +48,7 @@ async function settleWithin(promise, waitMs) {
 }
 
 export function createAgentModelServer({ innerServer, config, daemon, taskStore, createServer = http.createServer }) {
-  const authenticatedServer = createServer(async (request, response) => {
+  const authenticatedServer = createServer(guardRequestHandler(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`)
     const modelMatch = MODEL_ROUTE.exec(url.pathname)
     if (modelMatch) {
@@ -111,14 +111,17 @@ export function createAgentModelServer({ innerServer, config, daemon, taskStore,
     }
 
     innerServer.emit("request", request, response)
-  })
+  }))
 
   // This wrapper exists only in the multi-host machine daemon composition. Legacy standalone ACP /
   // OpenCode bridge servers never construct createAgentModelServer, so their auth and startup
   // contracts remain byte-for-byte outside the pairing path.
   const machine = daemon.snapshot?.().machine
   if (!machine) return authenticatedServer
-  const grant = createOneTimePairingGrant()
-  if (process.argv[1]?.endsWith("daemon-cli.js")) announceMachinePairing(config, grant)
-  return createPairingServer({ innerServer: authenticatedServer, config, machine, grant, createServer })
+  // One live pairing authority per daemon process. The startup grant is announced once in the
+  // terminal; the same authority keeps serving the authenticated /v1/pairing/grant route so the
+  // Machines list can show (and replace) a QR at any time without restarting the gateway.
+  const grants = new MachinePairingGrants()
+  if (process.argv[1]?.endsWith("daemon-cli.js")) announceMachinePairing(config, grants.current)
+  return createPairingServer({ innerServer: authenticatedServer, config, machine, grants, createServer })
 }

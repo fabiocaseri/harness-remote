@@ -1,30 +1,21 @@
 import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
 import { ATTACHMENT_MAX_COUNT, fileToAttachment, type AttachmentPart } from "../attachments"
+import type { QueuedPromptEntry } from "../mid-turn-policy"
 import type { CommandInfo, MessageEnvelope } from "../types"
 import { AlertIcon, ChatIcon, CloseIcon, JumpToBottomIcon, JumpToTopIcon, LoadingIcon, PaperclipIcon, StopCircleIcon } from "../Icons"
 import "../taskdesk-conversation.css"
-import "../taskdesk-conversation-fixes.css"
 import "../taskdesk-history-loader.css"
 import { TaskDeskMessageContent } from "./taskdesk-message-content"
+import { harnessIconUrl } from "../harness-icons"
 
-const HARNESS_ICON_FILES: Record<string, string> = {
-  codex: "codex.svg",
-  claude: "claude.svg",
-  opencode: "opencode.svg",
-  omp: "omp.svg",
-  pi: "pi.svg"
-}
 
-function harnessIconUrl(backend: string | undefined): string | undefined {
-  if (!backend) return undefined
-  const file = HARNESS_ICON_FILES[backend.toLowerCase()]
-  return file ? `${import.meta.env.BASE_URL}harness-icons/${file}` : undefined
-}
 
 const NEAR_BOTTOM_PX = 96
 const COMPOSER_MAX_HEIGHT_PX = 180
 const JUMP_AFFORDANCE_MAX_THRESHOLD = 320
 const JUMP_AFFORDANCE_MIN_RANGE = 240
+/** Where the live tail sits while a turn runs, as a fraction of the transcript height from the top. */
+const LIVE_TAIL_POSITION = 0.5
 
 type Props = {
   messages: MessageEnvelope[]
@@ -41,6 +32,7 @@ type Props = {
   commands?: CommandInfo[]
   attachments?: AttachmentPart[]
   attachmentsSupported?: boolean
+  composerAccessory?: ReactNode
   onAttachmentsChange?: (attachments: AttachmentPart[]) => void
   onAttachmentError?: (message: string) => void
   onSend: () => Promise<void> | void
@@ -48,6 +40,11 @@ type Props = {
   sendDisabled?: boolean
   /** Disable editing as well as Send while the owning Session is not safely writable yet. */
   composerDisabled?: boolean
+  /**
+   * Why the composer is waiting, shown as a status row above the field (for example while the model
+   * catalog loads). A disabled field alone looks the same as an idle one, so the wait has to be named.
+   */
+  composerBusyLabel?: string
   onStop?: () => Promise<void> | void
   stopping?: boolean
   workingLabel?: string
@@ -59,6 +56,16 @@ type Props = {
   directory?: string
   footerHint?: string
   renderMessage?: (message: MessageEnvelope) => ReactNode
+  /** Prompts accepted behind the running turn, rendered as the queued strip above the composer. */
+  queuedPrompts?: QueuedPromptEntry[]
+  /** Withdraw one queued prompt; renders the × on its row. */
+  onCancelQueuedPrompt?: (id: string) => void
+  /**
+   * The harness takes further prompts while its turn runs (steered into it or queued behind it), so
+   * `sending`/`waiting` describe the running turn rather than gate the composer, and Send stays
+   * available next to Stop.
+   */
+  canSendWhileWaiting?: boolean
 }
 
 type TranscriptProps = Pick<Props,
@@ -76,6 +83,17 @@ function formatClock(timestamp: number): string {
 
 function hasTouchFirstPointer(): boolean {
   return typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches === true
+}
+
+/**
+ * Size the room kept under a live turn so that, followed to the bottom, its newest line sits at
+ * LIVE_TAIL_POSITION of the transcript instead of against the composer. What the agent writes next
+ * then appears in open space, as in Claude and Codex.
+ */
+function sizeLiveRoom(transcript: HTMLElement, spacer: HTMLElement) {
+  const paddingBottom = Number.parseFloat(window.getComputedStyle(transcript).paddingBottom) || 0
+  const room = Math.max(0, Math.round(transcript.clientHeight * (1 - LIVE_TAIL_POSITION) - paddingBottom))
+  spacer.style.height = `${room}px`
 }
 
 function jumpAffordancesFor(element: HTMLElement): JumpAffordances {
@@ -184,6 +202,11 @@ const ConversationTranscript = memo(function ConversationTranscript({
   const followFrameRef = useRef<number | undefined>(undefined)
   const scrollFrameRef = useRef<number | undefined>(undefined)
   const previousSendingRef = useRef(false)
+  const spacerRef = useRef<HTMLDivElement>(null)
+  // Once a turn has run in this transcript it keeps its live room, including after the turn ends:
+  // dropping the room at completion would yank the finished reply down against the composer.
+  const liveRoomRef = useRef(false)
+  const liveRef = useRef(false)
   const [jumpAffordances, setJumpAffordances] = useState<JumpAffordances>({ top: false, bottom: false })
   loadOlderRef.current = onLoadOlder
 
@@ -192,10 +215,57 @@ const ConversationTranscript = memo(function ConversationTranscript({
     setJumpAffordances((current) => current.top === next.top && current.bottom === next.bottom ? current : next)
   }
 
+  function openLiveRoom(current: HTMLElement) {
+    liveRoomRef.current = true
+    if (spacerRef.current) sizeLiveRoom(current, spacerRef.current)
+  }
+
   useEffect(() => () => {
     if (followFrameRef.current !== undefined) window.cancelAnimationFrame(followFrameRef.current)
     if (scrollFrameRef.current !== undefined) window.cancelAnimationFrame(scrollFrameRef.current)
   }, [])
+
+  liveRef.current = sending || waiting
+
+  // A reply keeps growing after the frame that followed it: message content renders after the
+  // envelope arrives, and the transcript itself resizes with the window, the composer and a soft
+  // keyboard. Re-settle on those too, or the newest lines end up under the composer. Outside a live
+  // turn this only resizes the live room, so expanding an old tool card never moves the view.
+  useEffect(() => {
+    const transcript = transcriptRef.current
+    if (!transcript) return
+    let frame: number | undefined
+    const settle = () => {
+      if (frame !== undefined) return
+      frame = window.requestAnimationFrame(() => {
+        frame = undefined
+        if (preservingOlderRef.current) return
+        if (liveRoomRef.current && spacerRef.current) sizeLiveRoom(transcript, spacerRef.current)
+        if (nearBottomRef.current && liveRef.current) transcript.scrollTop = transcript.scrollHeight
+        else if (!liveRoomRef.current) return
+        refreshJumpAffordances(transcript)
+      })
+    }
+    const resizes = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(settle)
+    resizes?.observe(transcript)
+    const mutations = typeof MutationObserver === "undefined" ? undefined : new MutationObserver(settle)
+    mutations?.observe(transcript, { childList: true, subtree: true, characterData: true })
+    return () => {
+      resizes?.disconnect()
+      mutations?.disconnect()
+      if (frame !== undefined) window.cancelAnimationFrame(frame)
+    }
+  }, [])
+
+  // A live turn - just sent, or already working when the Session opened - leaves its tail halfway up
+  // the transcript, with room below for what comes next. Declared before the follow effect so the
+  // room exists when that effect pins the tail. Opening the room adds space below the content and
+  // moves nothing by itself.
+  useEffect(() => {
+    const transcript = transcriptRef.current
+    if (!transcript || loading || !ready || liveRoomRef.current || !(sending || waiting)) return
+    openLiveRoom(transcript)
+  }, [loading, ready, sending, waiting])
 
   useEffect(() => {
     const transcript = transcriptRef.current
@@ -346,7 +416,10 @@ const ConversationTranscript = memo(function ConversationTranscript({
                 ))}
           </>
         )}
-        {sending || (waiting && showWaitingIndicator) ? <ThinkingIndicator agentLabel={agentLabel} agentBackend={agentBackend} workingLabel={workingLabel} /> : null}
+        {/* Loading history is a read, not a new reply. Wait for the transcript before deciding
+            whether the live turn needs a placeholder or already has its own assistant bubble. */}
+        {!loading && ready && (sending || (waiting && showWaitingIndicator)) ? <ThinkingIndicator agentLabel={agentLabel} agentBackend={agentBackend} workingLabel={workingLabel} /> : null}
+        <div className="uw-transcript-reply-room" ref={spacerRef} aria-hidden="true" />
       </div>
 
       {jumpAffordances.top || jumpAffordances.bottom ? (
@@ -387,12 +460,14 @@ export function TaskDeskConversation({
   commands = [],
   attachments = [],
   attachmentsSupported = false,
+  composerAccessory,
   onAttachmentsChange,
   onAttachmentError,
   onSend,
   sending = false,
   sendDisabled = false,
   composerDisabled = false,
+  composerBusyLabel,
   onStop,
   stopping = false,
   workingLabel,
@@ -402,6 +477,9 @@ export function TaskDeskConversation({
   transcriptError,
   directory,
   footerHint,
+  queuedPrompts = [],
+  onCancelQueuedPrompt,
+  canSendWhileWaiting = false,
   renderMessage
 }: Props) {
   const composerRef = useRef<HTMLTextAreaElement>(null)
@@ -418,9 +496,19 @@ export function TaskDeskConversation({
       .filter((command) => command.name.toLowerCase().includes(query) || (command.description || "").toLowerCase().includes(query))
       .slice(0, 8)
   }, [commands, commandMenuOpen, commandToken])
-  const canSend = Boolean(draft.trim() && !sending && !waiting && !sendDisabled && !composerDisabled && ready)
+  // A consumer that never allows mid-turn prompts keeps the old gate: nothing is sent while a turn is
+  // waiting or its reply is being prepared. One whose harness steers or queues opts in explicitly.
+  const midTurnSend = canSendWhileWaiting && (waiting || sending)
+  const canSend = Boolean(
+    draft.trim()
+    && (midTurnSend || (!sending && !waiting))
+    && !sendDisabled
+    && !composerDisabled
+    && ready
+  )
   // A phone has no Ctrl or Cmd key, so telling a touch user to press Ctrl/Cmd+Enter named the one
   // way to send that they do not have. Enter inserts a newline there; the Send button is the action.
+  const composerBusy = Boolean(composerBusyLabel)
   const hint = footerHint ?? (touchFirst ? "Enter adds a line. Tap Send to send." : "Enter to send · Shift+Enter for a newline")
 
   useEffect(() => {
@@ -497,7 +585,33 @@ export function TaskDeskConversation({
         renderMessage={renderMessage}
       />
 
-      <div className="uw-composer-shell">
+      <div className={`uw-composer-shell${composerBusy ? " busy" : ""}`} aria-busy={composerBusy || undefined}>
+        {queuedPrompts.length ? (
+          <div className="uw-queued-prompts" aria-label="Prompts waiting behind the running turn">
+            {queuedPrompts.map((entry) => (
+              <span className="uw-queued-prompt" key={entry.id}>
+                <span className="uw-queued-prompt-badge">Queued</span>
+                {entry.text ? <span className="uw-queued-prompt-text">{entry.text}</span> : null}
+                {entry.attachmentCount ? (
+                  <span className="uw-queued-prompt-count">
+                    {entry.attachmentCount} image{entry.attachmentCount === 1 ? "" : "s"}
+                  </span>
+                ) : null}
+                {onCancelQueuedPrompt ? (
+                  <button
+                    type="button"
+                    className="uw-queued-prompt-cancel"
+                    onClick={() => onCancelQueuedPrompt(entry.id)}
+                    aria-label={`Remove queued prompt: ${entry.text || "attachments"}`}
+                    title="Remove from queue"
+                  >
+                    <CloseIcon size={13} />
+                  </button>
+                ) : null}
+              </span>
+            ))}
+          </div>
+        ) : null}
         {attachments.length ? (
           <div className="uw-composer-attachments" aria-label="Attached images">
             {attachments.map((attachment, index) => (
@@ -537,6 +651,12 @@ export function TaskDeskConversation({
             ))}
           </div>
         ) : null}
+        {composerBusy ? (
+          <div className="uw-composer-busy" id="uw-composer-busy" role="status" aria-live="polite">
+            <LoadingIcon size={14} />
+            <span>{composerBusyLabel}</span>
+          </div>
+        ) : null}
         <textarea
           ref={composerRef}
           value={draft}
@@ -546,8 +666,9 @@ export function TaskDeskConversation({
           rows={3}
           enterKeyHint={touchFirst ? "enter" : "send"}
           disabled={!ready || composerDisabled}
+          aria-disabled={!ready || composerDisabled || undefined}
           aria-label={`Message ${agentLabel}`}
-          aria-describedby="uw-composer-hint"
+          aria-describedby={composerBusy ? "uw-composer-busy" : "uw-composer-hint"}
         />
         <div className="uw-composer-footer">
           <span className="uw-composer-directory">{directory || ""}</span>
@@ -585,7 +706,22 @@ export function TaskDeskConversation({
                 </button>
               </>
             ) : null}
-            <small id="uw-composer-hint">{hint}</small>
+            {composerAccessory}
+            {/* While the composer is busy its status row above the field already says why. */}
+            {composerBusy ? null : <small id="uw-composer-hint">{hint}</small>}
+            {waiting && onStop && midTurnSend && draft.trim() ? (
+              // Stop alone left no way to deliver the message typed while the agent works - and no
+              // way at all on a phone, where Enter only adds a line.
+              <button
+                type="button"
+                className="uw-button uw-button-primary"
+                disabled={!canSend}
+                onClick={() => void onSend()}
+                aria-label="Send"
+              >
+                ↑<span className="uw-button-label">Send</span>
+              </button>
+            ) : null}
             {waiting && onStop ? (
               <button
                 type="button"
@@ -603,10 +739,10 @@ export function TaskDeskConversation({
                 className="uw-button uw-button-primary"
                 disabled={!canSend}
                 onClick={() => void onSend()}
-                aria-label={sending ? "Sending" : "Send"}
+                aria-label={sending && !midTurnSend ? "Sending" : "Send"}
               >
-                {sending ? <LoadingIcon size={15} /> : "↑"}
-                <span className="uw-button-label">{sending ? "Sending" : "Send"}</span>
+                {sending && !midTurnSend ? <LoadingIcon size={15} /> : "↑"}
+                <span className="uw-button-label">{sending && !midTurnSend ? "Sending" : "Send"}</span>
               </button>
             )}
           </div>

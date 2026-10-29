@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto"
 import http from "node:http"
-import { authenticateDaemonRequest, writeJSON } from "./http-policy.js"
+import { authenticateDaemonRequest, guardRequestHandler, writeJSON } from "./http-policy.js"
 import { normalizePortableHandoffState } from "./portable-handoff-state.js"
+import { runIdempotentMutation } from "./session-operation-ledger.js"
 
 const SESSION_OPERATION_ROUTE = /^\/v1\/agents\/([^/]+)\/session\/([^/]+)\/(claim|prompt|command|stop|handoff)$/
 const SESSION_LINK_ROUTE = "/v1/session-links"
@@ -174,56 +175,6 @@ function mutationSignature(operation, payload) {
   return createHash("sha256").update(JSON.stringify({ operation, ...payload })).digest("hex")
 }
 
-async function runIdempotentMutation({ operationLedger, identity, signature, dispatch, reconcile }) {
-  const started = await operationLedger.begin({ ...identity, signature })
-  if (started.duplicate) {
-    if (started.state === "uncertain" && typeof reconcile === "function") {
-      try {
-        const recovered = await reconcile(started.entry.result)
-        if (recovered) {
-          await operationLedger.accept({ ...identity, result: recovered })
-          return { status: "accepted", duplicate: true, result: recovered }
-        }
-      } catch {
-        // Reconciliation is read-only. A temporary read failure must leave the original uncertain
-        // entry untouched rather than replaying a resource-creating mutation.
-      }
-    }
-    return { status: started.state, duplicate: true, result: started.entry.result }
-  }
-
-  let dispatched = false
-  let checkpointedResult
-  const checkpoint = async (result) => {
-    await operationLedger.accept({ ...identity, result })
-    checkpointedResult = result
-  }
-
-  try {
-    const result = await dispatch({ checkpoint })
-    dispatched = true
-    const acceptedResult = result === undefined ? checkpointedResult : result
-    if (result !== undefined || checkpointedResult === undefined) {
-      await operationLedger.accept({ ...identity, result })
-    }
-    return { status: "accepted", duplicate: false, result: acceptedResult }
-  } catch (error) {
-    if (checkpointedResult !== undefined) {
-      // Resource identity is already durable. Any later title/model/link enrichment failure cannot
-      // turn the creation back into "unknown"; retries must return this exact resource.
-      return { status: "accepted", duplicate: false, result: checkpointedResult }
-    }
-    const ambiguous = dispatched || error?.ambiguous === true
-    await operationLedger.fail({
-      ...identity,
-      ambiguous,
-      ...(error?.recovery !== undefined ? { result: error.recovery } : {})
-    })
-    if (ambiguous) return { status: "uncertain", duplicate: false }
-    throw error
-  }
-}
-
 /**
  * Machine-daemon boundary for native Session ownership and idempotent mutations.
  *
@@ -248,7 +199,7 @@ export function createSessionClaimServer({
   sessionLinkStore,
   createServer = http.createServer
 }) {
-  return createServer(async (request, response) => {
+  return createServer(guardRequestHandler(async (request, response) => {
     const requestURL = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`)
     const match = SESSION_OPERATION_ROUTE.exec(requestURL.pathname)
     const sessionLinkRoute = requestURL.pathname === SESSION_LINK_ROUTE
@@ -377,5 +328,5 @@ export function createSessionClaimServer({
         ...(error?.code ? { code: error.code } : {})
       })
     }
-  })
+  }))
 }

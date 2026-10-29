@@ -1,17 +1,34 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react"
+import { createPortal } from "react-dom"
 import { App as CapacitorApp } from "@capacitor/app"
 import { api } from "../api"
+import {
+  FINISHED_ACTIVITY_MODES, LIVE_ACTIVITY_MODES, loadActivityPreferences, persistActivityPreferences, REASONING_MODES,
+  type ActivityPreferences, type FinishedActivityMode, type LiveActivityMode, type ReasoningMode
+} from "../activity-preferences"
 import { Capacitor } from "@capacitor/core"
 import {
+  activeSkin,
+  isSkinPreference,
   isThemePreference,
   loadLanguage,
+  loadHideRules,
+  loadRecentsEnabled,
+  loadSkinPreference,
   loadThemePreference,
   persistLanguage,
+  persistHideRules,
+  persistRecentsEnabled,
+  persistSkinPreference,
   persistThemePreference,
+  type SkinPreference,
   type ThemePreference
 } from "../appPreferences"
-import { ChatIcon, LoadingIcon, RefreshIcon, ServerIcon, SettingsIcon } from "../Icons"
-import { createTranslator, languageOptions, type LanguageCode } from "../i18n"
+import { ChatIcon, LoadingIcon, PencilIcon, PhoneIcon, RefreshIcon, SearchIcon, ServerIcon, SettingsIcon, TrashIcon } from "../Icons"
+import { harnessIconUrl } from "../harness-icons"
+import { createTranslator, languageOptions, type LanguageCode, type Translator } from "../i18n"
+import { chooseDesktopProjectFolder, desktopNetworkSettings, desktopProjectRoots, desktopUpdateStatus, openDesktopUpdate, setDesktopNetworkSettings, setDesktopProjectRoots } from "../desktopBridge"
+import type { DesktopUpdateStatus } from "../../electron/ipc-contract"
 import {
   availableMachineAgentCount,
   checkingMachineHealth,
@@ -26,7 +43,7 @@ import {
   MACHINE_LIVE_REFRESH_BURST_MS,
   MACHINE_RECONNECT_POLL_MS
 } from "../machine-live-refresh"
-import { discoverMachine, machineAgentStateLabel } from "../machineClient"
+import { discoverMachine, listMachineProjects, machineAgentStateLabel } from "../machineClient"
 import {
   discoverAgentNativeSessions,
   nativeSessionSurfaceTarget,
@@ -39,6 +56,7 @@ import { nativeSessionTransferredContext } from "../native-session-prompt"
 import type { NativeSessionRouteMachine } from "../native-session-routing"
 import type { MachineSnapshot, Session } from "../types"
 import { subscribeTaskDeskLiveEvents } from "../taskdesk-live-events"
+import { clearSessionIndexLiveStatuses } from "../session-index-live-state"
 import {
   createWorkspaceMachine,
   isDesktopLocalMachine,
@@ -49,6 +67,7 @@ import { reuseList } from "../workspace-runtime-merge"
 import { useDialogDismiss } from "../useDialogDismiss"
 import { useTranslator } from "../useTranslator"
 import { CommandPalette, type PaletteCommand } from "./shell"
+import { MachinePairingDialog } from "./machine-pairing-dialog"
 import { NativeSessionActions } from "./native-session-actions"
 import { NativeSessionHome } from "./native-session-home"
 import { NativeSessionTitle } from "./native-session-rename"
@@ -58,10 +77,13 @@ import "../taskdesk-mobile-navigation.css"
 import "../taskdesk-focus-layout.css"
 import "../conversation-control-plane.css"
 import "../machine-manager-health.css"
+import { AboutSection, SkinGalleryModal } from "./about-section"
+import { SKINS } from "../skins"
 
 /** The 2.x shell persisted its sidebar width and this one did not, so a large monitor got the same
  *  rail as a laptop. Its own key: the two shells have different rails and different defaults. */
 const RAIL_WIDTH_STORAGE_KEY = "harness-remote.sessionRailWidth.v1"
+const SESSION_FOCUS_STORAGE_KEY = "harness-remote.sessionFocusMode.v1"
 const RAIL_WIDTH_MIN = 260
 const RAIL_WIDTH_MAX = 620
 /** One arrow press. Wide enough to be worth pressing, small enough to land on an exact width. */
@@ -97,6 +119,14 @@ function loadRailWidth(): number | null {
   }
 }
 
+function loadSessionFocusMode(): boolean {
+  try {
+    return localStorage.getItem(SESSION_FOCUS_STORAGE_KEY) === "true"
+  } catch {
+    return false
+  }
+}
+
 type Props = {
   machines: WorkspaceMachine[]
   onPersistMachines: (machines: WorkspaceMachine[]) => void
@@ -104,6 +134,10 @@ type Props = {
   machinePairingBusy?: boolean
   machinePairingSuccessRevision?: number
   machinePairingSuccessMachineName?: string | null
+  // Desktop assembles its own local runtime asynchronously, so a momentarily empty `machines` is not
+  // proof that the user has none. Until this is true the shell must not treat emptiness as "add a
+  // machine", and must not auto-open the Machines manager over the Session list.
+  machinesReady?: boolean
 }
 type NativeMachineRuntime = {
   machine: WorkspaceMachine
@@ -114,74 +148,189 @@ type NativeMachineRuntime = {
 }
 
 
+function machineConnectionErrorText(error: unknown, t: Translator): string {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : ""
+  const status = message.match(/\bHTTP (\d{3})\b/)
+  return `${t("machine.connectionCheckFailed")}${status ? ` (HTTP ${status[1]})` : ""}`
+}
+
+type MachineFolders = {
+  status: "loading" | "ready" | "unavailable"
+  roots: string[]
+  environmentOverride?: string | null
+}
+
+async function readMachineFolders(machine: WorkspaceMachine, configurationProbe = false): Promise<MachineFolders> {
+  if (isDesktopLocalMachine(machine)) {
+    const state = await desktopProjectRoots()
+    return state ? { status: "ready", ...state } : { status: "unavailable", roots: [] }
+  }
+  const projects = await listMachineProjects(machine.config, { configurationProbe })
+  const roots = [...new Set(projects.filter((project) => project.configured === true).map((project) => project.path))]
+  // Older daemons do not mark configured roots; inaccessible roots are omitted from the catalog.
+  return { status: roots.length ? "ready" : "unavailable", roots }
+}
+
+function MachineFolderSummary({ folders }: { folders?: MachineFolders }) {
+  const t = useTranslator()
+  return (
+    <div className="uw-machine-folder-summary" aria-busy={!folders || folders.status === "loading"}>
+      <span className="uw-machine-section-label">{t("settings.projectFolders")}</span>
+      {folders?.roots.length ? <ul>{folders.roots.map((root) => <li key={root}><code>{root}</code></li>)}</ul>
+        : <small>{t(folders?.status === "unavailable" ? "machine.foldersUnavailable" : "settings.projectFoldersLoading")}</small>}
+    </div>
+  )
+}
+
 type MachineEditorProps = {
   machine: WorkspaceMachine
   onCancel: () => void
   onSave: (machine: WorkspaceMachine) => void
+  onFoldersSaved: (machine: WorkspaceMachine, folders: MachineFolders) => void
+  onBusyChange: (busy: boolean) => void
 }
 
-function MachineEditor({ machine, onCancel, onSave }: MachineEditorProps) {
+function MachineEditor({ machine, onCancel, onSave, onFoldersSaved, onBusyChange }: MachineEditorProps) {
   const t = useTranslator()
+  const runtimeOwned = isDesktopLocalMachine(machine)
   const [name, setName] = useState(machine.name)
   const [host, setHost] = useState(machine.config.host)
   const [port, setPort] = useState(String(machine.config.port))
   const [username, setUsername] = useState(machine.config.username)
   const [password, setPassword] = useState(machine.config.password)
   const [testing, setTesting] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [choosing, setChoosing] = useState(false)
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null)
-
+  const [folders, setFolders] = useState<MachineFolders>({ status: "loading", roots: [] })
+  const [draftRoots, setDraftRoots] = useState<string[]>([])
+  const [foldersError, setFoldersError] = useState<string | null>(null)
+  const formRef = useRef<HTMLFormElement>(null)
+  const folderRequestID = useRef(0)
   const validPort = Number(port) >= 1 && Number(port) <= 65_535
   const valid = Boolean(host.trim() && validPort)
+  const rootsChanged = JSON.stringify(draftRoots) !== JSON.stringify(folders.roots)
+  const remoteConnectionChanged = host !== machine.config.host || Number(port) !== machine.config.port || username !== machine.config.username || password !== machine.config.password
+  const busy = saving || choosing
 
   const nextMachine = (): WorkspaceMachine => ({
     ...machine,
     name: name.trim() || host.trim() || "Machine",
-    config: {
-      backend: "opencode",
-      host: host.trim(),
-      port: Number(port),
-      username: username.trim(),
-      password
-    }
+    config: { backend: "opencode", host: host.trim(), port: Number(port), username: username.trim(), password }
   })
 
+  useEffect(() => { formRef.current?.focus() }, [])
+  useEffect(() => { onBusyChange(busy); return () => onBusyChange(false) }, [busy, onBusyChange])
+  useEffect(() => {
+    let cancelled = false
+    const requestID = ++folderRequestID.current
+    setFolders({ status: "loading", roots: [] })
+    if (!runtimeOwned && (!valid || remoteConnectionChanged)) {
+      setFolders({ status: "unavailable", roots: [] })
+      return
+    }
+    // A remote path is resolved by that machine; never open this computer's native picker for it.
+    const timer = window.setTimeout(() => {
+      const target = runtimeOwned ? machine : nextMachine()
+      void readMachineFolders(target).then((result) => {
+        if (cancelled || requestID !== folderRequestID.current) return
+        setFolders(result)
+        setDraftRoots(result.roots)
+      }).catch(() => {
+        if (!cancelled && requestID === folderRequestID.current) setFolders({ status: "unavailable", roots: [] })
+      })
+    }, runtimeOwned ? 0 : 400)
+    return () => { cancelled = true; folderRequestID.current += 1; window.clearTimeout(timer) }
+    // Name changes do not change the remote filesystem; connection edits do.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [machine, runtimeOwned, host, port, username, password, valid, remoteConnectionChanged])
+
   async function testConnection() {
-    if (!valid || testing) return
+    if (!valid || testing || busy) return
     setTesting(true)
     setTestResult(null)
+    const requestID = ++folderRequestID.current
     try {
-      const snapshot = await discoverMachine(nextMachine().config)
-      if (!snapshot) {
-        setTestResult({ ok: false, text: t("sf.notADaemon") })
-      } else {
+      const target = nextMachine()
+      const snapshot = await discoverMachine(nextMachine().config, { configurationProbe: true })
+      if (folderRequestID.current !== requestID) return
+      if (!snapshot) setTestResult({ ok: false, text: t("sf.notADaemon") })
+      else {
         const count = snapshot.agents.length
         setTestResult({ ok: true, text: t("sf.connectedTo", { name: snapshot.machine.name, count }) })
+        const result = await readMachineFolders(target, true).catch(() => ({ status: "unavailable" as const, roots: [] }))
+        if (folderRequestID.current === requestID) setFolders(result)
       }
     } catch (error) {
-      setTestResult({ ok: false, text: error instanceof Error ? error.message : String(error) })
-    } finally {
-      setTesting(false)
-    }
+      setTestResult({ ok: false, text: machineConnectionErrorText(error, t) })
+    } finally { setTesting(false) }
+  }
+
+  async function addProjectFolder() {
+    setChoosing(true)
+    setFoldersError(null)
+    try {
+      const folder = await chooseDesktopProjectFolder()
+      if (folder) setDraftRoots((current) => current.includes(folder) ? current : [...current, folder])
+    } catch (error) { setFoldersError(error instanceof Error ? error.message : t("settings.projectFoldersError")) }
+    finally { setChoosing(false) }
+  }
+
+  async function save() {
+    if (busy || !valid) return
+    if (!runtimeOwned) { onSave(nextMachine()); return }
+    if (!rootsChanged) { onCancel(); return }
+    if (folders.status !== "ready" || folders.environmentOverride) return
+    setSaving(true)
+    setFoldersError(null)
+    try {
+      const result = await setDesktopProjectRoots(draftRoots)
+      if (!result) throw new Error(t("settings.projectFoldersError"))
+      if (result.cancelled) return
+      onFoldersSaved(machine, { status: "ready", roots: result.roots, environmentOverride: result.environmentOverride })
+    } catch (error) { setFoldersError(error instanceof Error ? error.message : t("settings.projectFoldersError")) }
+    finally { setSaving(false) }
   }
 
   return (
-    <div className="uw-machine-editor">
+    <form className={`uw-machine-editor${testResult ? testResult.ok ? " test-ok" : " test-fail" : ""}`} ref={formRef} tabIndex={-1} aria-label={t("machine.editorLabel")} aria-busy={busy} onSubmit={(event) => { event.preventDefault(); void save() }}>
       <div className="uw-machine-editor-grid">
-        <label><span>{t("sf.fieldName")}</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder={t("sf.machineNamePlaceholder")} /></label>
-        {/* A phone keyboard capitalises the first letter by default, which silently turned `localhost`
-            into `Localhost` and a username into a different username. Neither field is prose. */}
-        <label><span>{t("sf.fieldHost")}</span><input value={host} onChange={(event) => setHost(event.target.value)} placeholder="192.168.1.20 or localhost" spellCheck={false} autoCapitalize="none" autoCorrect="off" /></label>
-        <label><span>{t("sf.fieldPort")}</span><input value={port} onChange={(event) => setPort(event.target.value.replace(/\D/g, ""))} inputMode="numeric" /></label>
-        <label><span>{t("sf.fieldUsername")}</span><input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" spellCheck={false} autoCapitalize="none" autoCorrect="off" /></label>
-        <label className="uw-machine-editor-wide"><span>{t("sf.fieldPassword")}</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" /></label>
+        <label><span>{t("sf.fieldName")}</span><input value={runtimeOwned ? t("settings.thisComputer") : name} onChange={(event) => setName(event.target.value)} readOnly={runtimeOwned} disabled={busy} placeholder={t("sf.machineNamePlaceholder")} /></label>
+        <label><span>{t("sf.fieldHost")}</span><input value={host} onChange={(event) => setHost(event.target.value)} readOnly={runtimeOwned} disabled={busy || testing} placeholder="192.168.1.20 or localhost" spellCheck={false} autoCapitalize="none" autoCorrect="off" /></label>
+        <label><span>{t("sf.fieldPort")}</span><input value={port} onChange={(event) => setPort(event.target.value.replace(/\D/g, ""))} readOnly={runtimeOwned} disabled={busy || testing} inputMode="numeric" /></label>
+        {!runtimeOwned ? <>
+          <label><span>{t("sf.fieldUsername")}</span><input value={username} onChange={(event) => setUsername(event.target.value)} disabled={busy || testing} autoComplete="username" spellCheck={false} autoCapitalize="none" autoCorrect="off" /></label>
+          <label className="uw-machine-editor-wide"><span>{t("sf.fieldPassword")}</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} disabled={busy || testing} autoComplete="current-password" /></label>
+        </> : null}
       </div>
-      {testResult ? <div className={`uw-machine-test-result ${testResult.ok ? "ok" : "error"}`}>{testResult.text}</div> : null}
+      {runtimeOwned ? <p className="uw-machine-project-roots-note">{t("machine.localConnectionHint")}</p> : null}
+      <section className="hr-machine-project-roots" aria-busy={folders.status === "loading"}>
+        <h3>{t("settings.projectFolders")}</h3>
+        {runtimeOwned ? <>
+          <p>{t("machine.foldersSaveHint")}</p>
+          {folders.environmentOverride ? <p role="note">{t("settings.projectFoldersOverride", { root: folders.environmentOverride })}</p> : null}
+          {folders.status !== "ready" ? <p role={folders.status === "unavailable" ? "alert" : "status"}>{t(folders.status === "loading" ? "settings.projectFoldersLoading" : "settings.projectFoldersError")}</p> : <>
+            <ul className="hr-project-roots-list">
+              {draftRoots.map((root) => <li key={root}><code className="hr-path-tail" title={root}><bdi>{root}</bdi></code><button type="button" className="uw-manager-button" disabled={busy || Boolean(folders.environmentOverride)} onClick={() => setDraftRoots((current) => current.filter((candidate) => candidate !== root))}>{t("settings.projectFoldersRemove")}</button></li>)}
+            </ul>
+            {!draftRoots.length ? <p>{t("settings.projectFoldersHint")}</p> : null}
+            <div className="hr-project-roots-add">
+              <button type="button" className="uw-manager-button" disabled={busy || Boolean(folders.environmentOverride)} onClick={() => void addProjectFolder()}>{t("settings.projectFoldersAdd")}</button>
+            </div>
+          </>}
+        </> : <>
+          {folders.status !== "ready" && remoteConnectionChanged ? <p>{t("machine.testFoldersHint")}</p> : <MachineFolderSummary folders={folders} />}
+          <p className="uw-machine-project-roots-note">{t("settings.remoteProjectFoldersHint")}</p>
+        </>}
+        {foldersError ? <p role="alert">{foldersError}</p> : null}
+      </section>
+      {testResult ? <div className={`uw-machine-test-result ${testResult.ok ? "ok" : "error"}`} role="status">{testResult.text}</div> : null}
       <div className="uw-machine-editor-actions">
-        <button type="button" className="uw-manager-button" onClick={onCancel}>{t("sf.cancel")}</button>
-        <button type="button" className="uw-manager-button" disabled={!valid || testing} onClick={() => void testConnection()}>{testing ? t("sf.testing") : t("sf.testConnection")}</button>
-        <button type="button" className="uw-manager-button primary" disabled={!valid} onClick={() => valid && onSave(nextMachine())}>{t("sf.saveMachine")}</button>
+        <button type="button" className="uw-manager-button" disabled={busy} onClick={onCancel}>{t("sf.cancel")}</button>
+        {!runtimeOwned ? <button type="button" className="uw-manager-button" data-machine-test disabled={!valid || testing || busy} onClick={() => void testConnection()}>{testing ? t("sf.testing") : testResult?.ok ? t("sf.connectedShort") : t("sf.testConnection")}</button> : null}
+        <button type="submit" className="uw-manager-button primary" disabled={!valid || busy || (runtimeOwned && (folders.status !== "ready" || !rootsChanged || Boolean(folders.environmentOverride)))}>{saving ? t("machine.saving") : t("sf.saveMachine")}</button>
       </div>
-    </div>
+    </form>
   )
 }
 
@@ -190,6 +339,7 @@ function MachineManager({
   onClose,
   onPersist,
   onScanPairing,
+  onOpenSettings,
   pairingBusy = false,
   pairingSuccessRevision = 0,
   pairingSuccessMachineName = null
@@ -198,25 +348,40 @@ function MachineManager({
   onClose: () => void
   onPersist: (machines: WorkspaceMachine[]) => void
   onScanPairing?: () => Promise<void>
+  onOpenSettings?: () => void
   pairingBusy?: boolean
   pairingSuccessRevision?: number
   pairingSuccessMachineName?: string | null
 }) {
   const t = useTranslator()
+  // Compact skin: the top bar's magnifier searches machines while this page is open.
+  const [machineSearchOpen, setMachineSearchOpen] = useState(false)
+  const [machineQuery, setMachineQuery] = useState("")
+  const [topbarSlot, setTopbarSlot] = useState<HTMLElement | null>(null)
+  useEffect(() => {
+    setTopbarSlot(document.getElementById("hr-topbar-home-slot"))
+  }, [])
+  const machineNeedle = machineQuery.trim().toLowerCase()
+  const visibleMachines = machineNeedle
+    ? machines.filter((machine) => `${machine.name} ${machine.config.host}:${machine.config.port}`.toLowerCase().includes(machineNeedle))
+    : machines
   // Opening Machines is for inspecting the machines you already have. Creating another one is an
   // explicit action, so an asynchronously discovered machine can never leave a stale blank editor
   // open (desktop local runtime, QR pairing, or any future machine source all follow the same rule).
   const [editingID, setEditingID] = useState<string | null>(null)
+  const [editingMachine, setEditingMachine] = useState<WorkspaceMachine | null>(null)
+  const [editorBusy, setEditorBusy] = useState(false)
+  const [machineFolders, setMachineFolders] = useState<Record<string, MachineFolders | undefined>>({})
   const [confirmRemoveID, setConfirmRemoveID] = useState<string | null>(null)
+  const [pairingMachineID, setPairingMachineID] = useState<string | null>(null)
   const [completionMachineName, setCompletionMachineName] = useState<string | null>(null)
   const [health, setHealth] = useState<Record<string, MachineManagerHealth<MachineSnapshot> | undefined>>({})
   const probeRequestIDs = useRef<Record<string, number>>({})
   const dialogRef = useRef<HTMLElement>(null)
   const draft = useMemo(() => {
-    if (editingID === "new") return createWorkspaceMachine()
-    const machine = machines.find((candidate) => candidate.id === editingID)
-    return machine && !isDesktopLocalMachine(machine) ? machine : null
-  }, [editingID, machines])
+    if (editingID === "new") return { ...createWorkspaceMachine(), name: "" }
+    return editingMachine?.id === editingID ? editingMachine : machines.find((candidate) => candidate.id === editingID) ?? null
+  }, [editingID, editingMachine, machines])
 
   const probeMachine = useCallback((machine: WorkspaceMachine) => {
     const requestID = (probeRequestIDs.current[machine.id] || 0) + 1
@@ -225,6 +390,12 @@ function MachineManager({
       ...current,
       [machine.id]: checkingMachineHealth(current[machine.id])
     }))
+    setMachineFolders((current) => ({ ...current, [machine.id]: { status: "loading", roots: [] } }))
+    void readMachineFolders(machine).then((folders) => {
+      if (probeRequestIDs.current[machine.id] === requestID) setMachineFolders((current) => ({ ...current, [machine.id]: folders }))
+    }).catch(() => {
+      if (probeRequestIDs.current[machine.id] === requestID) setMachineFolders((current) => ({ ...current, [machine.id]: { status: "unavailable", roots: [] } }))
+    })
     void discoverMachine(machine.config).then(
       (snapshot) => {
         if (probeRequestIDs.current[machine.id] !== requestID) return
@@ -256,7 +427,11 @@ function MachineManager({
     }
   }, [machines, probeMachine])
 
-  useDialogDismiss(dialogRef, onClose)
+  const pairingMachine = pairingMachineID ? machines.find((machine) => machine.id === pairingMachineID) ?? null : null
+  const dismiss = () => { if (!editorBusy) { if (editingID) setEditingID(null); else onClose() } }
+  // The pairing dialog nested in this one owns Escape while it is open: the shared hook would
+  // otherwise dismiss the whole Machines dialog underneath it on the same keypress.
+  useDialogDismiss(dialogRef, dismiss, { enabled: !pairingMachine })
 
   useEffect(() => {
     if (pairingSuccessRevision <= 0) return
@@ -290,13 +465,14 @@ function MachineManager({
   const availableCount = availableMachineAgentCount(health)
 
   return (
-    <div className="uw-manager-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="uw-machine-manager" role="dialog" aria-modal="true" aria-label={t("sf.machines")} ref={dialogRef} onMouseDown={(event) => event.stopPropagation()}>
+    <div className="uw-manager-backdrop" role="presentation" onMouseDown={dismiss}>
+      <section className="uw-machine-manager" role="dialog" aria-modal="true" aria-label={draft ? t(editingID === "new" ? "sf.addMachine" : "machine.editTitle") : t("sf.machines")} ref={dialogRef} onMouseDown={(event) => event.stopPropagation()}>
         <header className="uw-machine-manager-header">
-          <div><h2>{t("sf.machines")}</h2><p>{t("sf.machinesSubtitle")}</p></div>
-          <button type="button" className="uw-manager-close" onClick={onClose} aria-label={t("sf.close")}>×</button>
+          <div><h2>{draft ? t(editingID === "new" ? "sf.addMachine" : "machine.editTitle") : t("sf.machines")}</h2><p>{draft ? isDesktopLocalMachine(draft) ? t("settings.thisComputer") : draft.name || t("sf.machinesSubtitle") : t("sf.machinesSubtitle")}</p></div>
+          <button type="button" className="uw-manager-close" disabled={editorBusy} onClick={dismiss} aria-label={t("sf.close")}>×</button>
         </header>
         <div className="uw-machine-manager-body">
+          <div className="uw-machine-overview" hidden={Boolean(draft)}>
           {completionMachineName ? (
             <div className="uw-machine-manager-success" role="status" aria-live="polite">
               <div>
@@ -329,7 +505,34 @@ function MachineManager({
               </div>
             </div>
           ) : null}
-          {machines.map((machine) => {
+          {machineSearchOpen ? (
+            <label className="hr-machine-search">
+              <SearchIcon size={14} />
+              <input
+                type="search"
+                autoFocus
+                value={machineQuery}
+                onChange={(event) => setMachineQuery(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Escape") { setMachineQuery(""); setMachineSearchOpen(false) } }}
+                placeholder={t("sf.searchMachines")}
+                aria-label={t("sf.searchMachines")}
+              />
+            </label>
+          ) : null}
+          {topbarSlot ? createPortal(
+            <button
+              type="button"
+              className={`tdw-icon-button hr-topbar-search hr-topbar-machine-search${machineSearchOpen || machineQuery ? " active" : ""}`}
+              onClick={() => setMachineSearchOpen((open) => !open)}
+              aria-label={t("sf.searchMachines")}
+              aria-expanded={machineSearchOpen}
+              title={t("sf.searchMachines")}
+            >
+              <SearchIcon size={16} />
+            </button>,
+            topbarSlot
+          ) : null}
+          {visibleMachines.map((machine) => {
             const check = health[machine.id]
             const state = check?.state || "checking"
             const snapshot = check?.snapshot
@@ -338,23 +541,31 @@ function MachineManager({
             return (
               <div className="uw-machine-config-card" data-machine-state={state} data-runtime-owned={runtimeOwned || undefined} key={machine.id}>
                 <div className="uw-machine-config-main">
-                  <strong>{snapshot?.machine.name || machine.name}</strong>
-                  {runtimeOwned ? <small className="uw-machine-runtime-owned">Managed by Harness Remote</small> : null}
-                  <span>{machine.config.host}:{machine.config.port}</span>
-                  <small className={`uw-machine-connection-state ${state}`} aria-live="polite">
-                    <i aria-hidden="true" />
-                    {state === "checking"
-                      ? t("sf.checkingAgents")
-                      : state === "online"
-                        ? t("sf.agentsDetected", { count: snapshot?.agents.length || 0 })
-                        : t("sf.machineUnavailable")}
-                  </small>
+                  <div className="uw-machine-card-header">
+                    <strong>{runtimeOwned ? snapshot?.machine.name || t("settings.thisComputer") : machine.name}</strong>
+                    {runtimeOwned ? <small className="uw-machine-runtime-owned">{t("settings.thisComputer")} · {t("machine.managedByApp")}</small> : null}
+                    <small className={`uw-machine-connection-state ${state}`} aria-live="polite">
+                      <i aria-hidden="true" />
+                      {state === "checking"
+                        ? t("sf.checkingAgents")
+                        : state === "online"
+                          ? t("sf.agentsDetected", { count: snapshot?.agents.length || 0 })
+                          : t("sf.machineUnavailable")}
+                    </small>
+                  </div>
+                  <dl className="uw-machine-card-facts">
+                    <div>
+                      <dt>{t("pair.address")}</dt>
+                      <dd><code>{machine.config.host}:{machine.config.port}</code></dd>
+                    </div>
+                  </dl>
                   {state === "offline" ? (
                     <small className="uw-machine-connection-error" role="status">
-                      {error || t("sf.notADaemon")}
+                      {error ? machineConnectionErrorText(error, t) : t("sf.notADaemon")}
                     </small>
                   ) : null}
-                  {snapshot?.agents.length ? <div className="uw-machine-harness-list">{snapshot.agents.map((agent) => <span className="uw-machine-harness" key={agent.id}><i className={agent.state} aria-hidden="true" /><strong>{agent.label}</strong><small>{machineAgentStateLabel(agent.state)}{agent.processID ? ` · PID ${agent.processID}` : ""}</small></span>)}</div> : null}
+                  {snapshot?.agents.length ? <div className="uw-machine-harness-list">{snapshot.agents.map((agent) => <span className="uw-machine-harness" key={agent.id}><i className={agent.state} aria-hidden="true" />{harnessIconUrl(agent.backend) ? <img className="uw-machine-harness-icon" src={harnessIconUrl(agent.backend)} alt="" /> : null}<strong>{agent.label}</strong><small>{machineAgentStateLabel(agent.state, t)}{agent.processID ? ` · PID ${agent.processID}` : ""}</small></span>)}</div> : null}
+                  <MachineFolderSummary folders={machineFolders[machine.id]} />
                 </div>
                 <div className="uw-machine-config-actions">
                   {confirmRemoveID === machine.id && !runtimeOwned ? (
@@ -366,10 +577,11 @@ function MachineManager({
                   ) : (
                     <>
                       {state === "offline" ? <button type="button" className="uw-manager-button" data-machine-retry onClick={() => probeMachine(machine)}>{t("sf.retry")}</button> : null}
+                      <button type="button" className="uw-manager-button" data-machine-pair-phone onClick={() => setPairingMachineID(machine.id)} title={t("pair.action")}><PhoneIcon size={15} className="uw-button-icon" /><span className="uw-button-text">{t("pair.action")}</span></button>
+                      <button type="button" className="uw-manager-button" data-machine-edit onClick={() => { setCompletionMachineName(null); setEditingMachine(machine); setEditingID(machine.id) }} title={t("sf.edit")}><PencilIcon size={15} className="uw-button-icon" /><span className="uw-button-text">{t("sf.edit")}</span></button>
                       {!runtimeOwned ? (
                         <>
-                          <button type="button" className="uw-manager-button" onClick={() => { setCompletionMachineName(null); setEditingID(machine.id) }}>{t("sf.edit")}</button>
-                          <button type="button" className="uw-manager-button danger" onClick={() => setConfirmRemoveID(machine.id)}>{t("sf.remove")}</button>
+                          <button type="button" className="uw-manager-button danger" onClick={() => setConfirmRemoveID(machine.id)} title={t("sf.remove")}><TrashIcon size={15} className="uw-button-icon" /><span className="uw-button-text">{t("sf.remove")}</span></button>
                         </>
                       ) : null}
                     </>
@@ -378,9 +590,13 @@ function MachineManager({
               </div>
             )
           })}
-          {draft ? <MachineEditor key={draft.id} machine={draft} onCancel={() => setEditingID(null)} onSave={save} /> : null}
+          </div>
+          {draft ? <MachineEditor key={draft.id} machine={draft} onCancel={() => setEditingID(null)} onSave={save} onBusyChange={setEditorBusy} onFoldersSaved={(machine, folders) => {
+            setMachineFolders((current) => ({ ...current, [machine.id]: folders }))
+            setEditingID(null)
+          }} /> : null}
         </div>
-        <footer className="uw-machine-manager-footer">
+        <footer className="uw-machine-manager-footer" hidden={Boolean(draft)}>
           <span>{t("sf.managerFooter", { machines: machines.length, agents: availableCount })}</span>
           {machines.length > 0 ? (
             <div className="uw-machine-manager-footer-actions">
@@ -393,6 +609,7 @@ function MachineManager({
             </div>
           ) : null}
         </footer>
+        {pairingMachine ? <MachinePairingDialog machine={pairingMachine} onClose={() => setPairingMachineID(null)} onOpenSettings={isDesktopLocalMachine(pairingMachine) ? onOpenSettings : undefined} /> : null}
       </section>
     </div>
   )
@@ -401,15 +618,109 @@ function MachineManager({
 function MobileSettingsPage({ onClose }: { onClose: () => void }) {
   const [language, setLanguage] = useState<LanguageCode>(loadLanguage)
   const [theme, setTheme] = useState<ThemePreference>(loadThemePreference)
+  const [skin, setSkin] = useState<SkinPreference>(loadSkinPreference)
+  const [recents, setRecents] = useState(loadRecentsEnabled)
+  const [hideRules, setHideRules] = useState(loadHideRules)
+  const [newRuleText, setNewRuleText] = useState("")
+  const [rulesModalOpen, setRulesModalOpen] = useState(false)
+  const [skinGalleryOpen, setSkinGalleryOpen] = useState(false)
+  const [editingRuleIndex, setEditingRuleIndex] = useState<number | null>(null)
+  function resetRuleForm() {
+    setEditingRuleIndex(null)
+    setNewRuleText("")
+  }
+  function startEditingRule(index: number) {
+    const rule = hideRules.rules[index]
+    if (rule === undefined) return
+    setEditingRuleIndex(index)
+    setNewRuleText(rule)
+  }
+  function changeHideRules(next: { enabled?: boolean; rules?: string[] }) {
+    const rules = { enabled: next.enabled ?? hideRules.enabled, rules: next.rules ?? hideRules.rules }
+    setHideRules(rules)
+    persistHideRules(rules)
+  }
+  function addHideRule() {
+    const text = newRuleText.trim()
+    if (!text) return
+    changeHideRules({
+      rules: editingRuleIndex === null
+        ? [...hideRules.rules, text]
+        : hideRules.rules.map((current, index) => index === editingRuleIndex ? text : current)
+    })
+    resetRuleForm()
+  }
+  function removeHideRule(index: number) {
+    changeHideRules({ rules: hideRules.rules.filter((_, position) => position !== index) })
+    if (editingRuleIndex === index) resetRuleForm()
+    else if (editingRuleIndex !== null && index < editingRuleIndex) setEditingRuleIndex(editingRuleIndex - 1)
+  }
+  const [activity, setActivity] = useState<ActivityPreferences>(loadActivityPreferences)
+  // The local daemon's network exposure is an app-level setting: only the desktop shell has an
+  // embedded runtime to configure, so a missing bridge hides the section instead of explaining it.
+  const [network, setNetwork] = useState<{ lanPairing: boolean } | null>(null)
+  const [networkBusy, setNetworkBusy] = useState(false)
+  const [networkError, setNetworkError] = useState<string | null>(null)
+  const [update, setUpdate] = useState<DesktopUpdateStatus | null>(null)
+  const [updateBusy, setUpdateBusy] = useState(false)
   const t = useMemo(() => createTranslator(language), [language])
   const pageRef = useRef<HTMLElement>(null)
   useDialogDismiss(pageRef, onClose, { autoFocus: false })
+
+  useEffect(() => {
+    let cancelled = false
+    void desktopNetworkSettings().then((state) => {
+      if (!cancelled && state) setNetwork({ lanPairing: state.lanPairing })
+    }).catch(() => {})
+    void desktopUpdateStatus().then((state) => {
+      if (!cancelled && state) setUpdate(state)
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [])
+
+  async function refreshUpdate() {
+    setUpdateBusy(true)
+    try { setUpdate(await desktopUpdateStatus(true)) }
+    catch { setUpdate({ status: "error", currentVersion: update?.currentVersion ?? "" }) }
+    finally { setUpdateBusy(false) }
+  }
+
+  /**
+   * LAN pairing applies immediately: there is no separate save. The main process shows the native
+   * confirmation, restarts the local runtime when the user accepts, and answers with the state that
+   * is true now. The toggle is always re-synced from that answer, so a cancelled dialog snaps back.
+   */
+  async function toggleLocalNetworkPairing(enabled: boolean) {
+    if (networkBusy) return
+    setNetworkBusy(true)
+    setNetworkError(null)
+    try {
+      const result = await setDesktopNetworkSettings(enabled)
+      if (!result) throw new Error(t("machine.networkPairingError"))
+      setNetwork({ lanPairing: result.lanPairing })
+    } catch (error) {
+      setNetwork((current) => (current ? { ...current } : current))
+      setNetworkError(error instanceof Error ? error.message : t("machine.networkPairingError"))
+    } finally { setNetworkBusy(false) }
+  }
 
   function changeLanguage(value: string) {
     const next = languageOptions.find((option) => option.code === value)?.code
     if (!next) return
     setLanguage(next)
     persistLanguage(next)
+  }
+
+  function changeActivity(change: Partial<ActivityPreferences>) {
+    const next = { ...activity, ...change }
+    setActivity(next)
+    persistActivityPreferences(next)
+  }
+
+  function changeSkin(value: string) {
+    if (!isSkinPreference(value)) return
+    setSkin(value)
+    persistSkinPreference(value)
   }
 
   function changeTheme(value: string) {
@@ -428,10 +739,102 @@ function MobileSettingsPage({ onClose }: { onClose: () => void }) {
         <div className="hr-mobile-settings-body">
           <div className="hr-mobile-settings-group">
             <span>{t("sf.interface")}</span>
-            <label><strong>{t("settings.theme")}</strong><select value={theme} onChange={(event) => changeTheme(event.target.value)}><option value="system">{t("settings.themeSystem")}</option><option value="light">{t("settings.themeLight")}</option><option value="dark">{t("settings.themeDark")}</option></select></label>
-            <label><strong>{t("settings.language")}</strong><select value={language} onChange={(event) => changeLanguage(event.target.value)}>{languageOptions.map((option) => <option value={option.code} key={option.code}>{option.label}</option>)}</select></label>
+            <label data-icon="theme"><strong>{t("settings.theme")}</strong><select value={theme} onChange={(event) => changeTheme(event.target.value)}><option value="system">{t("settings.themeSystem")}</option><option value="light">{t("settings.themeLight")}</option><option value="dark">{t("settings.themeDark")}</option></select></label>
+            <button type="button" className="hr-settings-row-button" data-icon="skin" onClick={() => setSkinGalleryOpen(true)}>
+              <strong>{t("settings.skin")}</strong>
+              <span>{t(SKINS.find((option) => option.id === skin)?.nameKey ?? "settings.skinClassic")} ›</span>
+            </button>
+            {skinGalleryOpen ? <SkinGalleryModal t={t} skin={skin} onSkinChange={changeSkin} onClose={() => setSkinGalleryOpen(false)} /> : null}
+            {activeSkin(skin) === "compact" ? (
+              <>
+              <label data-icon="recents"><strong>{t("settings.recents")}</strong><select value={recents ? "on" : "off"} onChange={(event) => { const next = event.target.value === "on"; setRecents(next); persistRecentsEnabled(next) }}><option value="on">{t("settings.recentsOn")}</option><option value="off">{t("settings.recentsOff")}</option></select></label>
+              <label data-icon="hide"><strong>{t("settings.hideAuto")}</strong><select value={hideRules.enabled ? "on" : "off"} onChange={(event) => changeHideRules({ enabled: event.target.value === "on" })}><option value="on">{t("settings.recentsOn")}</option><option value="off">{t("settings.recentsOff")}</option></select></label>
+              {hideRules.enabled ? (
+                <button type="button" className="hr-settings-row-button" data-icon="rules" onClick={() => { resetRuleForm(); setRulesModalOpen(true) }}>
+                  <strong>{t("settings.hideRules")}</strong>
+                  <span>{t("settings.hideRulesCount", { count: hideRules.rules.length })} ›</span>
+                </button>
+              ) : null}
+              </>
+            ) : null}
+            {rulesModalOpen ? (
+              <>
+                <button type="button" className="hr-rules-modal-backdrop" aria-label={t("action.close")} onClick={() => setRulesModalOpen(false)} />
+                <section className="hr-rules-modal" role="dialog" aria-modal="true" aria-label={t("settings.hideRules")}>
+                  <header>
+                    <strong>{t("settings.hideRules")}</strong>
+                    <button type="button" aria-label={t("action.close")} onClick={() => setRulesModalOpen(false)}>×</button>
+                  </header>
+                  <small>{t("settings.hideHint")}</small>
+                  <table className="hr-rules-table">
+                    <thead>
+                      <tr>
+                        <th scope="col">{t("settings.hideColumnText")}</th>
+                        <th scope="col" className="hr-rules-actions">{t("settings.hideColumnActions")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {hideRules.rules.map((rule, index) => (
+                        <tr key={`${rule}:${index}`} className={editingRuleIndex === index ? "editing" : undefined}>
+                          <td title={rule}>{rule}</td>
+                          <td className="hr-rules-actions">
+                            <button type="button" aria-label={`${t("settings.hideEdit")}: ${rule}`} title={t("settings.hideEdit")} onClick={() => startEditingRule(index)}><PencilIcon size={15} /></button>
+                            <button type="button" className="danger" aria-label={`${t("settings.hideRemove")}: ${rule}`} title={t("settings.hideRemove")} onClick={() => removeHideRule(index)}><TrashIcon size={15} /></button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <form className="hr-settings-hide-add" onSubmit={(event) => { event.preventDefault(); addHideRule() }}>
+                    <input value={newRuleText} onChange={(event) => setNewRuleText(event.target.value)} placeholder={t("settings.hidePlaceholder")} aria-label={t("settings.hidePlaceholder")} autoCapitalize="off" autoCorrect="off" spellCheck={false} />
+                    <button type="submit" disabled={!newRuleText.trim()}>{editingRuleIndex === null ? t("settings.hideAdd") : t("settings.hideSave")}</button>
+                    {editingRuleIndex !== null ? <button type="button" className="hr-rule-cancel" onClick={resetRuleForm}>{t("settings.hideCancelEdit")}</button> : null}
+                  </form>
+                </section>
+              </>
+            ) : null}
+            <label data-icon="language"><strong>{t("settings.language")}</strong><select value={language} onChange={(event) => changeLanguage(event.target.value)}>{languageOptions.map((option) => <option value={option.code} key={option.code}>{option.label}</option>)}</select></label>
           </div>
           <p>{t("sf.appearanceShared")}</p>
+          <div className="hr-mobile-settings-group" data-settings-activity>
+            <span>{t("settings.activityTitle")}</span>
+            <label data-icon="live"><strong>{t("settings.activityLive")}</strong><select value={activity.live} onChange={(event) => changeActivity({ live: event.target.value as LiveActivityMode })}>{LIVE_ACTIVITY_MODES.map((mode) => <option value={mode} key={mode}>{t(`settings.activityLive.${mode}`)}</option>)}</select></label>
+            <label data-icon="finished"><strong>{t("settings.activityFinished")}</strong><select value={activity.finished} onChange={(event) => changeActivity({ finished: event.target.value as FinishedActivityMode })}>{FINISHED_ACTIVITY_MODES.map((mode) => <option value={mode} key={mode}>{t(`settings.activityFinished.${mode}`)}</option>)}</select></label>
+            <label data-icon="reasoning"><strong>{t("settings.activityReasoning")}</strong><select value={activity.reasoning} onChange={(event) => changeActivity({ reasoning: event.target.value as ReasoningMode })}>{REASONING_MODES.map((mode) => <option value={mode} key={mode}>{t(`settings.activityReasoning.${mode}`)}</option>)}</select></label>
+          </div>
+          <p>{t("settings.activityHint")}</p>
+          <AboutSection t={t} skin={skin} onSkinChange={changeSkin} />
+          {network ? (
+            <div className="hr-mobile-settings-group">
+              <span>{t("machine.networkPairingTitle")}</span>
+              <label>
+                <strong>{t("machine.networkPairingEnable")}</strong>
+                <input
+                  type="checkbox"
+                  data-settings-network-pairing
+                  checked={network.lanPairing}
+                  disabled={networkBusy}
+                  onChange={(event) => void toggleLocalNetworkPairing(event.target.checked)}
+                />
+              </label>
+              <p>{t("machine.networkPairingHint")}</p>
+              {networkError ? <p role="alert">{networkError}</p> : null}
+            </div>
+          ) : null}
+          {update ? (
+            <div className="hr-mobile-settings-group" data-settings-update>
+              <span>{t("settings.updatesTitle")}</span>
+              <p role="status">{update.status === "available"
+                ? t("settings.updateAvailable", { version: update.latestVersion })
+                : update.status === "current"
+                  ? t("settings.updateCurrent", { version: update.currentVersion })
+                  : t("settings.updateError")}</p>
+              <div>
+                {update.status === "available" ? <button type="button" className="tdw-button primary" onClick={() => void openDesktopUpdate()}>{t("settings.updateDownload")}</button> : null}
+                <button type="button" className="tdw-button" disabled={updateBusy} onClick={() => void refreshUpdate()}>{t("settings.updateCheck")}</button>
+              </div>
+            </div>
+          ) : null}
         </div>
         <footer><button type="button" className="tdw-button primary" onClick={onClose}>{t("action.close")}</button></footer>
       </section>
@@ -453,16 +856,34 @@ function compactNumber(value: number): string {
 
 function NativeSessionsWorkspace({
   machines,
+  machinesLoading,
   onManageMachines,
   onManageSettings,
   onAttentionCountChange
 }: {
   machines: WorkspaceMachine[]
+  machinesLoading: boolean
   onManageMachines: () => void
   onManageSettings: () => void
   onAttentionCountChange: (count: number) => void
 }) {
   const t = useTranslator()
+  // What is waiting for the user - input requests and finished replies not opened yet - shows in
+  // the window title, the one place it is visible while Harness Remote is a background tab.
+  const [waitingCounts, setWaitingCounts] = useState({ attention: 0, ready: 0 })
+  const handleAttentionCountChange = useCallback((count: number) => {
+    onAttentionCountChange(count)
+    setWaitingCounts((current) => current.attention === count ? current : { ...current, attention: count })
+  }, [onAttentionCountChange])
+  const handleUnseenReadyCountChange = useCallback((count: number) => {
+    setWaitingCounts((current) => current.ready === count ? current : { ...current, ready: count })
+  }, [])
+  const baseTitleRef = useRef(typeof document === "undefined" ? "" : document.title)
+  useEffect(() => {
+    const waiting = waitingCounts.attention + waitingCounts.ready
+    document.title = waiting ? `(${waiting}) ${baseTitleRef.current}` : baseTitleRef.current
+  }, [waitingCounts])
+  useEffect(() => () => { document.title = baseTitleRef.current }, [])
   const [runtimes, setRuntimes] = useState<NativeMachineRuntime[]>(() =>
     machines.map((machine) => ({ machine, snapshot: null, state: "loading", consecutiveFailures: 0 }))
   )
@@ -480,6 +901,10 @@ function NativeSessionsWorkspace({
   const [liveMachines, setLiveMachines] = useState<Record<string, boolean>>({})
   const [reconnectingStreams, setReconnectingStreams] = useState<Record<string, boolean>>({})
   const [selected, setSelected] = useState<NativeSessionSurfaceTarget | null>(null)
+  // Every explicit open of a Session surface is a new view. It lets the conversation retire the
+  // "getting started" label that belonged to a Send made in an earlier view, even when the phone rail
+  // kept the very same Session mounted instead of remounting it.
+  const [sessionViewRevision, setSessionViewRevision] = useState(0)
   const [selectedState, setSelectedState] = useState<NativeSessionVisualState | undefined>(undefined)
   const [selectedLinks, setSelectedLinks] = useState<NativeSessionLink[]>([])
   const [lineageError, setLineageError] = useState<string | null>(null)
@@ -502,6 +927,7 @@ function NativeSessionsWorkspace({
   // is actually waiting for. See the startup states below.
   const [sessionsDiscovered, setSessionsDiscovered] = useState(machines.length === 0)
   const [railWidth, setRailWidth] = useState<number | null>(loadRailWidth)
+  const [sessionFocusMode, setSessionFocusMode] = useState(loadSessionFocusMode)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const refreshGeneration = useRef(0)
   const pendingSessionRefreshToken = useRef<number | null>(null)
@@ -587,11 +1013,16 @@ function NativeSessionsWorkspace({
         : { machine, snapshot: null, state: "loading", consecutiveFailures: 0 }
     })))
 
+    // Each machine settles (and is applied to `runtimes`) independently, as soon as its own probe
+    // finishes, instead of all at once after every machine answers. A single unreachable machine
+    // used to hold the whole array back in `Promise.all` until its own ~12s+retry timeout expired,
+    // freezing "Connecting to your machines..." for every already-online machine too.
     void Promise.all(machines.map(async (machine): Promise<NativeMachineRuntime> => {
+      let result: NativeMachineRuntime
       try {
         const snapshot = await discoverMachineWithRetry(machine.config)
         if (snapshot) migrateNativeSessionMachineStorage(machine.id, snapshot.machine.id)
-        return snapshot
+        result = snapshot
           ? { machine, snapshot, state: "online", consecutiveFailures: 0 }
           : { machine, snapshot: null, state: "offline", error: "This endpoint is not a Harness machine daemon.", consecutiveFailures: MACHINE_OFFLINE_FAILURE_THRESHOLD }
       } catch (reason) {
@@ -599,28 +1030,17 @@ function NativeSessionsWorkspace({
         const previous = previousRuntimes.get(machine.id)
         const sameEndpoint = Boolean(previous && sameMachineConnection(previous.machine.config, machine.config))
         const consecutiveFailures = (previous?.consecutiveFailures || 0) + 1
-        if (sameEndpoint && previous?.snapshot && consecutiveFailures < MACHINE_OFFLINE_FAILURE_THRESHOLD) {
-          return {
-            ...previous,
-            machine,
-            state: "online",
-            error,
-            consecutiveFailures
-          }
-        }
-        return {
-          machine,
-          snapshot: null,
-          state: "offline",
-          error,
-          consecutiveFailures
-        }
+        result = sameEndpoint && previous?.snapshot && consecutiveFailures < MACHINE_OFFLINE_FAILURE_THRESHOLD
+          ? { ...previous, machine, state: "online", error, consecutiveFailures }
+          : { machine, snapshot: null, state: "offline", error, consecutiveFailures }
       }
-    })).then((next) => {
       if (!cancelled && refreshGeneration.current === generation) {
-        setRuntimes((current) => reuseList(current, next))
+        setRuntimes((current) => reuseList(current, current.map((runtime) =>
+          runtime.machine.id === machine.id ? result : runtime
+        )))
       }
-    }).finally(() => {
+      return result
+    })).finally(() => {
       if (!cancelled && refreshGeneration.current === generation) {
         setLoaded(true)
         setMachineRefreshPending(false)
@@ -689,7 +1109,13 @@ function NativeSessionsWorkspace({
       if (document.visibilityState === "visible") setRevision((value) => value + 1)
     }, interval)
     const onVisibility = () => {
-      if (document.visibilityState === "visible") setRevision((value) => value + 1)
+      if (document.visibilityState !== "visible") return
+      // The phone may have slept through a turn's terminal edge while the tab was hidden. A streamed
+      // busy status is only a short bridge across an event/index race, so on resume it is dropped and
+      // the rail is told to re-read native truth immediately instead of waiting out its own interval.
+      clearSessionIndexLiveStatuses()
+      setRevision((value) => value + 1)
+      setListRevision((value) => value + 1)
     }
     document.addEventListener("visibilitychange", onVisibility)
     return () => {
@@ -699,7 +1125,6 @@ function NativeSessionsWorkspace({
   }, [loaded, reconnectingCount, reconnectingStreamCount, hasReachableMachine, streamTargets, liveMachines])
 
   const onlineCount = runtimes.filter((runtime) => runtime.state === "online").length
-  const loadingCount = runtimes.filter((runtime) => runtime.state === "loading").length
   const offlineCount = runtimes.filter((runtime) => runtime.state === "offline").length
   const selectedRuntime = selected
     ? runtimes.find((runtime) => runtime.snapshot?.machine.id === selected.machineID || runtime.machine.id === selected.machineID)
@@ -832,8 +1257,13 @@ function NativeSessionsWorkspace({
       : { relation: "Continues in", ref: link.target }
   }
 
+  // Block on "machines" only while nothing has answered at all. Once at least one machine has
+  // settled (online or offline), a still-probing sibling no longer holds up the rest of the app -
+  // it folds into onlineCount/offlineCount whenever it finishes, same as an explicit refresh
+  // already handles a straggler.
+  const anyMachineSettled = onlineCount > 0 || offlineCount > 0
   const startupPhase: "machines" | "sessions" | "ready" =
-    !loaded || loadingCount > 0 ? "machines" : !sessionsDiscovered ? "sessions" : "ready"
+    machinesLoading || (!loaded && !anyMachineSettled) ? "machines" : !sessionsDiscovered ? "sessions" : "ready"
   const workspaceRefreshing = machineRefreshPending || sessionRefreshPending
   // Keep one feedback point near the action that began the explicit refresh. Background probes do
   // not set either flag, so an unreachable saved machine cannot leave a permanent global spinner.
@@ -847,6 +1277,7 @@ function NativeSessionsWorkspace({
   function openSession(target: NativeSessionSurfaceTarget) {
     setSelectedState(undefined)
     setSelected(target)
+    setSessionViewRevision((value) => value + 1)
     setMobileDetailOpen(true)
   }
 
@@ -901,6 +1332,14 @@ function NativeSessionsWorkspace({
 
   const handleSessionDeletionSettled = clearSessionDeleting
 
+  function toggleSessionFocusMode() {
+    setSessionFocusMode((current) => {
+      const next = !current
+      try { localStorage.setItem(SESSION_FOCUS_STORAGE_KEY, String(next)) } catch {}
+      return next
+    })
+  }
+
   function handleSessionRenamed(session: Session, title: string) {
     const nextTitle = session.title?.trim() || title
     setSelected((current) => current ? { ...current, title: nextTitle } : current)
@@ -910,28 +1349,28 @@ function NativeSessionsWorkspace({
   const paletteCommands = useMemo<PaletteCommand[]>(() => [
     {
       id: "machines",
-      group: "Workspace",
+      group: t("palette.groupWorkspace"),
       label: t("sf.machines"),
       keywords: "server machine hosts",
       run: onManageMachines
     },
     {
       id: "settings",
-      group: "Workspace",
+      group: t("palette.groupWorkspace"),
       label: t("nav.settings"),
       keywords: "preferences appearance language",
       run: onManageSettings
     },
     {
       id: "refresh",
-      group: "Sessions",
+      group: t("palette.groupSessions"),
       label: t("sf.refresh"),
       keywords: "reload refresh sessions",
       run: requestRefresh
     },
     ...(selected ? [{
       id: "back-to-sessions",
-      group: "Sessions",
+      group: t("palette.groupSessions"),
       label: t("sf.backToSessions"),
       keywords: "close current session list",
       run: () => setMobileDetailOpen(false)
@@ -939,9 +1378,10 @@ function NativeSessionsWorkspace({
   ], [onManageMachines, onManageSettings, requestRefresh, selected, t])
 
   return (
-    <section className="tdw-shell hr-control-plane hr-native-workspace" aria-label={t("nav.sessions")}>
+    <section className={`tdw-shell hr-control-plane hr-native-workspace${sessionFocusMode ? " session-focus-mode" : ""}`} aria-label={t("nav.sessions")}>
       <header className="tdw-topbar hr-topbar">
-        <div className="tdw-brand hr-brand"><img className="tdw-logo hr-logo hr-app-icon" src={`${import.meta.env.BASE_URL}icon-192.png`} alt="" width={32} height={32} /><div><strong>Harness Remote</strong><small>{t("sf.brandTagline")}</small></div></div>
+        <div className="tdw-brand hr-brand"><img className="tdw-logo hr-logo hr-app-icon" src={`${import.meta.env.BASE_URL}icon-192.png`} alt="" width={32} height={32} /><div><strong>Harness Remote</strong><small>{t("sf.brandTagline")}</small></div>
+        </div>
         <div className="tdw-context-path" aria-label={t("sf.workspaceContext")}>
           <span>{selectedMachine?.name || t("sf.allMachines")}</span><b>/</b>
           <strong>{selectedProject || t("sf.nativeSessions")}</strong>
@@ -953,7 +1393,20 @@ function NativeSessionsWorkspace({
             {t("sf.machineCount", { online: onlineCount, total: machines.length })}
           </span>
           <button type="button" className="tdw-button secondary tdw-machines-button" onClick={onManageMachines}><ServerIcon size={15} /> {t("sf.machines")}</button>
-          <button type="button" className="palette-hint" onClick={() => setPaletteOpen(true)} title="Command palette"><span>⌘K</span></button>
+          <div id="hr-topbar-home-slot" className="hr-topbar-home-slot" />
+          <button type="button" className="palette-hint" onClick={() => setPaletteOpen(true)} title={t("command.commandPalette")} aria-label={t("command.commandPalette")}><span>⌘K</span></button>
+          {selected ? (
+            <button
+              type="button"
+              className="tdw-icon-button hr-session-focus-toggle"
+              onClick={toggleSessionFocusMode}
+              title={sessionFocusMode ? t("sf.showSessionControls") : t("sf.hideSessionControls")}
+              aria-label={sessionFocusMode ? t("sf.showSessionControls") : t("sf.hideSessionControls")}
+              aria-pressed={sessionFocusMode}
+            >
+              <ChatIcon size={16} />
+            </button>
+          ) : null}
           <button type="button" className="tdw-icon-button" onClick={onManageSettings} title={t("nav.settings")} aria-label={t("nav.settings")}><SettingsIcon size={16} /></button>
           <button type="button" className="tdw-icon-button hr-refresh-button" onClick={() => requestRefresh("toolbar")} title={toolbarRefreshing ? t("sf.refreshingMachines") : t("sf.refresh")} aria-label={toolbarRefreshing ? t("sf.refreshingMachines") : t("sf.refresh")} aria-busy={toolbarRefreshing || undefined} disabled={workspaceRefreshing}>
             {toolbarRefreshing ? <LoadingIcon size={16} /> : <RefreshIcon size={16} />}
@@ -970,10 +1423,14 @@ function NativeSessionsWorkspace({
             onOpen={openSession}
             refreshToken={listRevision}
             authoritativeRefreshToken={authoritativeListRevision}
-            onAttentionCountChange={onAttentionCountChange}
+            onAttentionCountChange={handleAttentionCountChange}
+            onUnseenReadyCountChange={handleUnseenReadyCountChange}
             onDiscoveredChange={setSessionsDiscovered}
             onRefreshComplete={completeSessionRefresh}
             selectedKey={selected?.key}
+            // Mahurley at phone width: back on the list, the conversation is no longer on screen, so
+            // it must not clear its own "Just finished" mark.
+            selectionOnScreen={activeSkin() !== "compact" || mobileDetailOpen}
             selectedState={selectedState}
             deletingKeys={deletingSessionKeys}
             deletedKeys={deletedSessionKeys}
@@ -1008,20 +1465,19 @@ function NativeSessionsWorkspace({
             <>
               <button type="button" className="tdw-mobile-back" onClick={() => setMobileDetailOpen(false)} aria-label={t("sf.backToSessions")}>← {t("nav.sessions")}</button>
               <header className="hr-native-workspace-session-header">
-                <div className="hr-native-session-heading">
+                <div
+                  className="hr-native-session-heading"
+                  title={[selected.external ? t("sf.startedInHarness") : t("sf.createdInHarnessRemote"), selected.directory].filter(Boolean).join(" · ")}
+                >
                   <div className="hr-native-session-eyebrow">
                     <span>{selected.agentLabel}</span>
                     {selected.nativeAgent ? <><i aria-hidden="true">/</i><span>{selected.nativeAgent}</span></> : null}
-                    <i aria-hidden="true">/</i>
-                    <span>{selectedMachine?.name || "Machine"}</span>
-                    <i aria-hidden="true">/</i>
-                    <strong>{selectedProject}</strong>
                   </div>
                   <NativeSessionTitle target={selected} onRenamed={handleSessionRenamed} />
-                  <small title={selected.directory}>
-                    {selected.external ? t("sf.startedInHarness") : t("sf.createdInHarnessRemote")}
-                    {selected.directory ? ` · ${selected.directory}` : ""}
-                  </small>
+                  <small>{selected.external ? t("sf.startedInHarness") : t("sf.createdInHarnessRemote")}</small>
+                  {/* Its own element so a narrow header can give the path a full line, clipped at the
+                      start: the end of a path is the part that tells two projects apart. */}
+                  {selected.directory ? <small className="hr-native-session-directory hr-path-tail" title={selected.directory}><bdi>{selected.directory}</bdi></small> : null}
                 </div>
                 <div className="hr-native-workspace-session-actions">
                   {selected.nativeAgent || selectedPolicyLabel || selectedTokenCount || selectedHasChanges || Number(selected.cost) > 0 ? (
@@ -1085,6 +1541,7 @@ function NativeSessionsWorkspace({
                   key={selected.key}
                   target={selected}
                   routes={routeMachines}
+                  surfaceViewRevision={sessionViewRevision}
                   interactionEnabled={selectedInteractionEnabled}
                   onConnectionIssue={markSelectedMachineConnectionIssue}
                   onOpenSession={openSession}
@@ -1093,6 +1550,16 @@ function NativeSessionsWorkspace({
                 />
               </div>
             </>
+          ) : machinesLoading ? (
+            /* Desktop is still assembling its local runtime, so an empty list is not yet an answer.
+               Showing "add your first machine" here invited the user to configure what was already
+               on its way. */
+            <div className="hr-native-workspace-empty hr-native-startup connecting" role="status" aria-live="polite">
+              <LoadingIcon size={28} />
+              <span>{t("sf.preparing")}</span>
+              <strong>{t("sf.connectingMachines")}</strong>
+              <p>{t("sf.connectingBody")}</p>
+            </div>
           ) : machines.length === 0 ? (
             <div className="hr-native-workspace-empty hr-native-startup">
               <ServerIcon size={28} />
@@ -1140,16 +1607,19 @@ function NativeSessionsWorkspace({
           )}
         </main>
       </div>
-      {paletteOpen ? (
+      {/* Portalled to <body>: inside the workspace's stacking context the Machines and Settings pages
+          (z-index 200+) covered the palette, so it opened invisibly from those screens. */}
+      {paletteOpen ? createPortal(
         <CommandPalette
           commands={paletteCommands}
-          placeholder="Type a command…"
-          emptyLabel="No matching commands"
-          navigateHint="navigate"
-          runHint="run"
-          closeHint="close"
+          placeholder={t("palette.placeholder")}
+          emptyLabel={t("palette.empty")}
+          navigateHint={t("palette.navigate")}
+          runHint={t("palette.run")}
+          closeHint={t("palette.close")}
           onClose={() => setPaletteOpen(false)}
-        />
+        />,
+        document.body
       ) : null}
     </section>
   )
@@ -1161,16 +1631,31 @@ export function StandaloneUniversalWorkspace({
   onScanMachinePairing,
   machinePairingBusy = false,
   machinePairingSuccessRevision = 0,
-  machinePairingSuccessMachineName = null
+  machinePairingSuccessMachineName = null,
+  machinesReady = true
 }: Props) {
   const t = useTranslator()
   // With the chat full-screen on a phone the rail is invisible, so a Session asking for input had
   // no way of saying so. The counts already existed per machine and per project; only the badge
   // that carries them out of the rail was missing.
   const [attentionCount, setAttentionCount] = useState(0)
-  const [managerOpen, setManagerOpen] = useState(machines.length === 0)
+  // Never open the manager on the first render just because the list is still empty: on desktop that
+  // emptiness is a pending local runtime, so the manager flashed open and then showed the machines it
+  // had just found. Open it once, and only once the list has settled with no machines at all.
+  const [managerOpen, setManagerOpen] = useState(machinesReady && machines.length === 0)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Compact skin: inside a conversation the bottom navigation folds away behind a handle.
+  const [navPeek, setNavPeek] = useState(false)
+  const managerAutoOpened = useRef(false)
+  const machinesLoading = !machinesReady && machines.length === 0
   const mobileSection = managerOpen ? "machines" : settingsOpen ? "settings" : "sessions"
+
+  useEffect(() => {
+    if (managerAutoOpened.current) return
+    if (!machinesReady) return
+    managerAutoOpened.current = true
+    if (machines.length === 0) setManagerOpen(true)
+  }, [machinesReady, machines.length])
 
   useEffect(() => {
     if (Capacitor.getPlatform() !== "android") return
@@ -1243,20 +1728,22 @@ export function StandaloneUniversalWorkspace({
 
   return (
     <div className="uw-standalone-host">
-      <NativeSessionsWorkspace machines={machines} onManageMachines={showMachines} onManageSettings={showSettings} onAttentionCountChange={setAttentionCount} />
+      <NativeSessionsWorkspace machines={machines} machinesLoading={machinesLoading} onManageMachines={showMachines} onManageSettings={showSettings} onAttentionCountChange={setAttentionCount} />
       {managerOpen ? (
         <MachineManager
           machines={machines}
           onClose={() => setManagerOpen(false)}
           onPersist={onPersistMachines}
           onScanPairing={onScanMachinePairing}
+          onOpenSettings={showSettings}
           pairingBusy={machinePairingBusy}
           pairingSuccessRevision={machinePairingSuccessRevision}
           pairingSuccessMachineName={machinePairingSuccessMachineName}
         />
       ) : null}
       {settingsOpen ? <MobileSettingsPage onClose={() => setSettingsOpen(false)} /> : null}
-      <nav className="hr-mobile-nav" aria-label={t("sf.mainNavigation")}>
+      <button type="button" className={`hr-mobile-nav-handle${navPeek ? " open" : ""}`} onClick={() => setNavPeek((open) => !open)} aria-expanded={navPeek} aria-label={t("sf.mainNavigation")}><i aria-hidden="true" /></button>
+      <nav className={`hr-mobile-nav${navPeek ? " peek" : ""}`} aria-label={t("sf.mainNavigation")} onClickCapture={() => setNavPeek(false)}>
         <button type="button" className={mobileSection === "sessions" ? "active" : ""} onClick={showSessions} aria-current={mobileSection === "sessions" ? "page" : undefined}><ChatIcon size={20} /><span>{t("nav.sessions")}</span>{attentionCount ? <b className="hr-mobile-nav-badge" aria-label={t("sf.attentionCount", { count: attentionCount })}>{attentionCount > 9 ? "9+" : attentionCount}</b> : null}</button>
         <button type="button" className={mobileSection === "machines" ? "active" : ""} onClick={showMachines} aria-current={mobileSection === "machines" ? "page" : undefined}><ServerIcon size={20} /><span>{t("sf.machines")}</span></button>
         <button type="button" className={mobileSection === "settings" ? "active" : ""} onClick={showSettings} aria-current={mobileSection === "settings" ? "page" : undefined}><SettingsIcon size={20} /><span>{t("nav.settings")}</span></button>

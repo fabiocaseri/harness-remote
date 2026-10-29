@@ -1,6 +1,6 @@
 import { homedir } from "node:os"
 import path from "node:path"
-import { harnessProfile, resolveAcpLaunch } from "./harness-profiles.js"
+import { harnessProfile, listAcpProviderProfiles, resolveAcpLaunch } from "./harness-profiles.js"
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"])
 
@@ -36,16 +36,22 @@ function parseBackend(value) {
   return harnessProfile(value).id
 }
 
+function parseNonNegativeInteger(value, name) {
+  const parsed = Number(value)
+  if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${name} must be a non-negative integer`)
+  return parsed
+}
+
 
 function environmentValue(environment, name) {
   return environment[`HARNESS_REMOTE_${name}`] ?? environment[`OMP_BRIDGE_${name}`]
 }
 
 
-export function parseConfig(args, environment = process.env) {
+export function parseConfig(args, environment = process.env, { resolveLaunch = resolveAcpLaunch } = {}) {
   const backend = parseBackend(environmentValue(environment, "BACKEND") ?? "omp")
   const profile = harnessProfile(backend)
-  const launch = resolveAcpLaunch(profile)
+  const launch = resolveLaunch(profile)
   const acpCommand = environmentValue(environment, "ACP_COMMAND")
   const acpArgs = environmentValue(environment, "ACP_ARGS")
   const root = environmentValue(environment, "ROOT")
@@ -61,7 +67,16 @@ export function parseConfig(args, environment = process.env) {
     roots: root ? [root] : [],
     corsOrigins: cors ? [cors] : [],
     logRequests: environmentValue(environment, "LOG_REQUESTS") === "1",
+    verbose: environmentValue(environment, "VERBOSE") === "1",
     stateDirectory: environmentValue(environment, "STATE_DIR") ?? path.join(homedir(), ".harness-remote")
+  }
+  const idleUnloadMs = environmentValue(environment, "IDLE_UNLOAD_MS")
+  const maxLoadedSessions = environmentValue(environment, "MAX_LOADED_SESSIONS")
+  if (idleUnloadMs !== undefined || maxLoadedSessions !== undefined) {
+    config.sessionLifecycle = {
+      ...(idleUnloadMs !== undefined ? { idleUnloadMs: parseNonNegativeInteger(idleUnloadMs, "HARNESS_REMOTE_IDLE_UNLOAD_MS") } : {}),
+      ...(maxLoadedSessions !== undefined ? { maxLoadedSessions: parseNonNegativeInteger(maxLoadedSessions, "HARNESS_REMOTE_MAX_LOADED_SESSIONS") } : {})
+    }
   }
   let acpCommandOverridden = acpCommand !== undefined
   let acpArgsOverridden = acpArgs !== undefined
@@ -72,7 +87,7 @@ export function parseConfig(args, environment = process.env) {
       case "--backend":
         config.backend = parseBackend(requireValue(args, index, option))
         {
-          const selected = resolveAcpLaunch(harnessProfile(config.backend))
+          const selected = resolveLaunch(harnessProfile(config.backend))
           if (!acpCommandOverridden) config.acpCommand = selected.command
           if (!acpArgsOverridden) config.acpArgs = [...selected.args]
         }
@@ -118,6 +133,9 @@ export function parseConfig(args, environment = process.env) {
       case "--log-requests":
         config.logRequests = true
         break
+      case "--verbose":
+        config.verbose = true
+        break
       case "--state-dir":
         config.stateDirectory = requireValue(args, index, option)
         index += 1
@@ -140,5 +158,6 @@ export function parseConfig(args, environment = process.env) {
 }
 
 export function usage() {
-  return `Usage: harness-remote-bridge [options]\n\nOptions:\n  --backend <name>       ACP backend: omp or pi (default: omp)\n  --host <host>          Bind host (default: 127.0.0.1)\n  --port <port>          Bind port (default: 4097)\n  --username <username>  Enable HTTP Basic Auth\n  --password <password>  Enable HTTP Basic Auth\n  --acp-command <path>   ACP adapter command (default depends on backend)\n  --acp-arg <arg>        ACP adapter argument; repeatable\n  --root <path>          Allowed worktree root; repeatable\n  --cors <origin>        Allow browser requests from this exact origin; repeatable\n  --state-dir <path>     Persist bridge session snapshots\n  --log-requests         Log request method, path, and query\n  --help                 Show this help`
+  const backends = listAcpProviderProfiles().map((provider) => provider.id).join(", ")
+  return `Usage: harness-remote-bridge [options]\n\nOptions:\n  --backend <name>       ACP backend: ${backends} (default: omp)\n  --host <host>          Bind host (default: 127.0.0.1)\n  --port <port>          Bind port (default: 4097)\n  --username <username>  Enable HTTP Basic Auth\n  --password <password>  Enable HTTP Basic Auth\n  --acp-command <path>   ACP adapter command (default depends on backend)\n  --acp-arg <arg>        ACP adapter argument; repeatable\n  --root <path>          Allowed worktree root; repeatable\n  --cors <origin>        Allow browser requests from this exact origin; repeatable\n  --state-dir <path>     Persist bridge session snapshots\n  --log-requests         Log request method, path, and query\n  --verbose              Forward all harness diagnostics, not only errors\n  --help                 Show this help`
 }
