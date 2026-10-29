@@ -72,21 +72,31 @@ test("Session-first workspace keeps machines projects harness filters models and
   assert.match(standalone, /persistLanguage/)
   assert.match(home, /machineFilter/)
   assert.match(home, /agentFilter/)
+  // The shared harness select still filters by agent id; a Mahurley logo filters by backend
+  // (`backend:<name>`) so the same backend on two machines with different agent ids stays visible.
+  assert.match(home, /choices\.set\(item\.record\.agentId/, 'the shared harness select keeps one entry per agent id')
+  assert.match(home, /matchesAgentFilter\(agentFilter, item\.record\.agentId, item\.record\.backend\)/, 'Session filtering accepts an agent id or a backend filter')
+  assert.match(home, /matchesAgentFilter\(agentFilter, entry\.agent\.id, entry\.agent\.backend\)/, 'older-page targets follow the same filter')
+  assert.match(home, /setAgentFilter\(selected \? "" : backendFilterValue\(agent\.backend\)\)/, 'a logo filters by backend across machines')
+  assert.match(home, /!isBackendFilter\(agentFilter\) && !agentChoices\.some/, 'a backend filter is not reset by a machine-only scope change')
   assert.match(home, /createNativeSessionTarget/)
   assert.match(home, /New Session|sf\.newSession/)
   assert.match(observer, /NATIVE_SESSION_MODEL_SCOPE/)
   assert.match(observer, /deferModelFallback/)
 })
 
-test("desktop-owned local machine stays visible but cannot be edited or removed", () => {
+test("desktop-owned local machine protects its connection and exposes its project folder settings", () => {
   const standalone = read("./components/standalone-universal-workspace.tsx")
 
   assert.match(standalone, /isDesktopLocalMachine/)
   assert.match(standalone, /const runtimeOwned = isDesktopLocalMachine\(machine\)/)
   assert.match(standalone, /data-runtime-owned=\{runtimeOwned \|\| undefined\}/)
-  assert.match(standalone, /Managed by Harness Remote/)
+  assert.match(standalone, /t\("machine\.managedByApp"\)/)
+  assert.match(standalone, /data-machine-edit/)
+  assert.match(standalone, /<MachineFolderSummary folders=\{machineFolders\[machine\.id\]\}/)
+  assert.match(standalone, /<MachineEditor key=\{draft\.id\} machine=\{draft\}/)
   assert.match(standalone, /if \(isDesktopLocalMachine\(machine\)\) return[\s\S]*const remove = \(machine: WorkspaceMachine\) => \{[\s\S]*if \(isDesktopLocalMachine\(machine\)\) return/)
-  assert.match(standalone, /\{!runtimeOwned \? \([\s\S]*setEditingID\(machine\.id\)[\s\S]*setConfirmRemoveID\(machine\.id\)[\s\S]*\) : null\}/)
+  assert.match(standalone, /\{!runtimeOwned \? \([\s\S]*setConfirmRemoveID\(machine\.id\)[\s\S]*\) : null\}/)
   assert.match(standalone, /state === "offline" \? <button[^>]*data-machine-retry/, 'runtime-owned machines must keep the normal health retry action')
 })
 
@@ -126,8 +136,9 @@ test("Session chat keeps bounded paging live events attention Stop and startup f
   const chat = read("./components/work-thread-conversation.tsx")
   const shared = read("./components/taskdesk-conversation.tsx")
   const parts = read("./conversation-parts.ts")
-  const overrides = read("./conversation-control-plane-overrides.css")
-  const messageContent = read("./components/taskdesk-message-content.tsx")
+  const activityCss = read("./activity-timeline.css")
+  const activityView = read("./components/activity-timeline.tsx")
+  const i18n = read("./i18n.ts")
   const attentionHome = read("./components/native-session-home-attention.tsx")
 
   assert.match(chat, /INITIAL_PAGE_SIZE = 200/)
@@ -146,8 +157,9 @@ test("Session chat keeps bounded paging live events attention Stop and startup f
   assert.match(shared, /sending \|\| \(waiting && showWaitingIndicator\)/)
   assert.match(parts, /if \(forceRunning\) return "running"/)
   assert.doesNotMatch(parts, /state\?\.status === "error"\)\) return "error"/)
-  assert.match(overrides, /uw-activity-group\.uw-tool-running/)
-  assert.match(messageContent, /status === "running" \? "Working" : status/)
+  assert.match(activityCss, /\.hr-activity\.is-running/)
+  assert.match(activityView, /running \? t\("act\.working"\)/)
+  assert.match(i18n, /'act\.working': 'Working'/)
 })
 
 test("Session UI preserves stable autoscroll memoized rows and mobile keyboard behavior", () => {
