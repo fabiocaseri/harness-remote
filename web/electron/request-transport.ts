@@ -7,7 +7,7 @@ const MAX_TIMEOUT_MS = 300_000
 const METHODS = new Set(["GET", "POST", "PATCH", "DELETE"])
 const MAX_PATH_LENGTH = 8192
 const MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
-const ROUTE_BACKENDS = new Set<DesktopProfile["backend"]>(["opencode", "omp", "pi", "claude", "codex"])
+const ROUTE_BACKENDS = new Set<DesktopProfile["backend"]>(["opencode", "opencode2", "omp", "pi", "claude", "codex", "copilot", "mimo"])
 const MAX_AGENT_ID_LENGTH = 128
 
 function transportError(code: Exclude<DesktopRequestResult, { ok: true }>["error"]["code"], message: string, status?: number): DesktopRequestResult {
@@ -70,7 +70,7 @@ async function readBoundedBody(response: Response, onReader?: (reader: ReadableS
  * aims them at a bridge where they do not exist, so the profile's scope applies to everything except
  * these machine-owned routes.
  */
-const MACHINE_SCOPED_PATH = /^\/(?:v1\/machine|global\/machine|v1\/projects|v1\/project-(?:identity|outcome)|v1\/tasks(?:\/|$)|v1\/agents\/)/
+const MACHINE_SCOPED_PATH = /^\/(?:v1\/machine|global\/machine|v1\/projects|v1\/project-(?:identity|outcome)|v1\/plugins(?:\/|$)|v1\/tasks(?:\/|$)|v1\/agents\/)/
 
 function validPath(path: unknown): path is string {
   return typeof path === "string"

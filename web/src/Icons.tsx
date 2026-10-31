@@ -133,6 +133,24 @@ export const PaperclipIcon = ({ className = "", size = 20 }: { className?: strin
   </svg>
 )
 
+export const PhoneIcon = ({ className = "", size = 20 }: { className?: string; size?: number }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    aria-hidden="true"
+  >
+    <rect x="6" y="2" width="12" height="20" rx="2.5" />
+    <path d="M11 18h2" />
+  </svg>
+)
+
 export const LoadingIcon = ({ className = "", size = 20 }: { className?: string; size?: number }) => (
   <svg 
     width={size} 
@@ -417,6 +435,24 @@ export const AgentIcon = ({ className = "", size = 20 }: { className?: string; s
     <path d="M12 4v4" />
     <circle cx="9" cy="14" r="1" />
     <circle cx="15" cy="14" r="1" />
+  </svg>
+)
+
+export const PuzzleIcon = ({ className = "", size = 20 }: { className?: string; size?: number }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    role="img"
+    aria-label="Plugins"
+  >
+    <path d="M8.5 3.5h4a1.5 1.5 0 0 1 1.5 1.5v1.2a2.3 2.3 0 1 0 4.6 0V5a1.5 1.5 0 0 1 1.5-1.5h.4v4a1.5 1.5 0 0 1-1.5 1.5h-1.2a2.3 2.3 0 1 0 0 4.6H19a1.5 1.5 0 0 1 1.5 1.5v4h-4a1.5 1.5 0 0 1-1.5-1.5v-1.2a2.3 2.3 0 1 0-4.6 0V19a1.5 1.5 0 0 1-1.5 1.5h-4v-4a1.5 1.5 0 0 1 1.5-1.5h1.2a2.3 2.3 0 1 0 0-4.6H5A1.5 1.5 0 0 1 3.5 9V5h4Z" />
   </svg>
 )
 

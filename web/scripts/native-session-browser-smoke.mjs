@@ -441,6 +441,8 @@ function stopServer(server) {
 
 async function seed(page) {
   await page.addInitScript(({ key, port }) => {
+    // This PI contract smoke opens the Session row directly; Classic keeps Projects expanded.
+    localStorage.setItem("harness-remote.skin", "classic")
     localStorage.setItem(key, JSON.stringify([{
       id: "machine-pi-v3-first",
       name: "PI v3-first Test",
@@ -460,7 +462,7 @@ async function waitFor(predicate, description, timeout = 12_000) {
 
 async function waitForReady(page) {
   try {
-    await page.locator(".tdw-conversation-state.ready").waitFor({ state: "attached", timeout: 12_000 })
+    await page.locator(".tdw-conversation-state.ready:visible").waitFor({ state: "visible", timeout: 12_000 })
     const composer = page.getByRole("textbox", { name: "Message PI" })
     await composer.waitFor({ state: "visible", timeout: 12_000 })
     assert.equal(await composer.isDisabled(), false, "v3 composer must be enabled when the Session is ready")
@@ -555,7 +557,7 @@ async function assertExistingSessionContract(browser, viewport, mobile) {
 
   await openSession(page, "PI v3-first regression session")
   assert.equal(claimCount, 0, "opening and reading an external PI Session must not claim its writer")
-  assert.ok(modelCatalogReads > 0, "the mature v3 controller must load the PI model catalog without claiming writer ownership")
+  await waitFor(() => modelCatalogReads > 0, "the mature v3 controller to load the PI model catalog without claiming writer ownership")
   await waitFor(() => sseResponses.size > 0, "PI v3 live event connection")
 
   for (const marker of ["PI-HISTORY-USER-1", "PI-HISTORY-ASSISTANT-1", "PI-HISTORY-USER-2", "PI-HISTORY-ASSISTANT-2"]) {
@@ -591,14 +593,14 @@ async function assertExistingSessionContract(browser, viewport, mobile) {
   assert.equal(await page.getByText(SUCCESS_PROMPT, { exact: true }).count(), 1, "PI success prompt duplicated")
   assert.equal(await page.getByText(SUCCESS_REPLY, { exact: true }).count(), 1, "PI final answer duplicated")
 
-  const activity = page.locator(".uw-activity-group").last()
-  await activity.locator("summary").click()
+  const activity = page.locator(".hr-activity").last()
+  await activity.locator(".hr-activity-toggle").click()
   await page.getByText("PI reasoning marker", { exact: true }).waitFor({ state: "visible" })
   assert.equal(await page.getByText("PI reasoning marker", { exact: true }).count(), 1, "PI reasoning duplicated")
-  assert.equal(await activity.locator(".uw-tool-card").count(), 1, "PI tool updates with different message ids must converge by call identity")
+  assert.equal(await activity.locator(".hr-act-tool").count(), 1, "PI tool updates with different message ids must converge by call identity")
   assert.equal(await page.getByText("PI working note before tool", { exact: true }).count(), 1, "PI working note duplicated")
 
-  const orderedMarkers = [SUCCESS_PROMPT, "PI reasoning marker", "PI working note before tool", "PI tool", SUCCESS_REPLY]
+  const orderedMarkers = [SUCCESS_PROMPT, "PI reasoning marker", "PI working note before tool", "printf pi", SUCCESS_REPLY]
   const ordered = await page.locator(".uw-transcript").evaluate((element, markers) => {
     const text = element.textContent || ""
     return markers.map((value) => text.indexOf(value))

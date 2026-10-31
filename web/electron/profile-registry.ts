@@ -4,7 +4,7 @@ import { baseUrl } from "../src/serverConfig.js"
 import type { BackendKind } from "../src/types.js"
 import type { DesktopProfile } from "./ipc-contract.js"
 
-const BACKENDS: readonly BackendKind[] = ["opencode", "omp", "pi", "claude", "codex"]
+const BACKENDS: readonly BackendKind[] = ["opencode", "opencode2", "omp", "pi", "claude", "codex", "copilot", "mimo"]
 const MAX_PROFILE_COUNT = 100
 const MAX_PROFILE_ID_LENGTH = 128
 const MAX_HOST_LENGTH = 2048
@@ -137,8 +137,9 @@ function sameProfile(left: DesktopProfile, right: DesktopProfile): boolean {
 /** Main-owned allowlist. Renderer profile mutation represents user-approved Settings state. */
 export class ProfileRegistry {
   private profiles = new Map<string, DesktopProfile>()
-  // Runtime profiles are deliberately process-local. In particular, the desktop-owned daemon uses
-  // ephemeral credentials that must never be serialized into desktop-profiles.json.
+  // Runtime profiles are deliberately process-local. The desktop-owned daemon credential is
+  // persisted separately in embedded-daemon-auth.json so phone pairing survives a restart; it must
+  // never be serialized into desktop-profiles.json.
   private runtimeProfiles = new Map<string, DesktopProfile>()
   private nextRevision = 0
   private writeQueue: Promise<void> = Promise.resolve()
