@@ -32,6 +32,17 @@ const OPENCODE_RECOVERY_WATCH_MS = 2 * 60 * 1000
 // that orphaned optimistic turn into a visible failure instead of spinning until navigation.
 const OPENCODE_SILENT_TURN_GRACE_MS = 15_000
 
+/**
+ * OpenCode 2 exports the same native message records as OpenCode: an assistant envelope carries
+ * `finish` and `time.completed`, and a reasoning-only envelope can look finished before any
+ * user-visible text exists. The transcript-based lifecycle reconciliation and the bounded
+ * idle/no-final recovery therefore apply to both; only the backend id differs, for routing and
+ * model discovery.
+ */
+function usesOpenCodeLifecycle(backend: string): boolean {
+  return backend === "opencode" || backend === "opencode2"
+}
+
 type NativeTurnRecord = {
   id: string
   prompt: string
@@ -56,12 +67,26 @@ type NativeConversationEntry = {
   error: { message: string } | null
   initialPageCaptured: boolean
   piTailMessages: MessageEnvelope[]
+  /**
+   * The last OpenCode 2 tail before its source switched. While a bridge-owned turn runs the page
+   * comes from the ACP stream; once it settles the same messages are served from the harness journal
+   * under native `msg_...` ids. Keeping the previous page lets a tail read preserve the identity the
+   * mounted feed already knows, so the journal copy replaces a turn instead of appearing beside it.
+   */
+  openCode2TailMessages: MessageEnvelope[]
   writerReady: boolean
   writerClaimInFlight: Promise<void> | null
   turns: Map<string, NativeTurnRecord>
+  // Prompts the daemon holds behind the running turn, by native message id. Each becomes a turn only
+  // when the transcript shows it started; see reconcileQueuedPrompts.
+  queuedPrompts: Map<string, QueuedNativePrompt>
   listeners: Set<(conversation: ConversationRuntime) => void>
   transcriptListeners: Set<() => void>
 }
+
+// `seen`: a tail page has shown the row. Until then its absence from a page proves nothing, because
+// that page may predate the send.
+type QueuedNativePrompt = { prompt: string; model: ModelSelection | null; clientRequestId?: string; seen: boolean }
 
 const conversations = new Map<string, NativeConversationEntry>()
 
@@ -115,6 +140,80 @@ function piStableAssistantKey(message: MessageEnvelope): string | null {
   if (!textParts.length) return null
   const text = canonicalText(textParts.map((part) => part.text || "").join("\n"))
   return text ? `text:${text}` : null
+}
+
+function piPrecedingUserID(index: number, messages: MessageEnvelope[]): string | null {
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const candidate = messages[cursor]
+    if (candidate.info.role === "user") return candidate.info.id || null
+  }
+  return null
+}
+
+/**
+ * PI can stream a partial ACP assistant envelope, then journal the completed answer under a new
+ * id. Only bridge that identity when the same stabilized user turn has one unambiguous assistant
+ * envelope on each side and the visible text only grew.
+ */
+function stabilizePiProgressiveAssistantIDs(
+  previous: MessageEnvelope[],
+  next: MessageEnvelope[]
+): MessageEnvelope[] {
+  const previousIDs = new Set(previous.map((message) => message.info.id))
+  const nextIDs = new Set(next.map((message) => message.info.id))
+  const previousAssistants = new Map<string, MessageEnvelope[]>()
+  const nextAssistants = new Map<string, MessageEnvelope[]>()
+  const previousAssistantCounts = new Map<string, number>()
+  const nextAssistantCounts = new Map<string, number>()
+
+  const collect = (
+    messages: MessageEnvelope[],
+    groups: Map<string, MessageEnvelope[]>,
+    counts: Map<string, number>,
+    excludedIDs: Set<string>
+  ) => {
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index]
+      if (message.info.role !== "assistant") continue
+      const userID = piPrecedingUserID(index, messages)
+      if (!userID) continue
+      counts.set(userID, (counts.get(userID) ?? 0) + 1)
+      if (excludedIDs.has(message.info.id)) continue
+      const candidates = groups.get(userID) ?? []
+      candidates.push(message)
+      groups.set(userID, candidates)
+    }
+  }
+  collect(previous, previousAssistants, previousAssistantCounts, nextIDs)
+  collect(next, nextAssistants, nextAssistantCounts, previousIDs)
+
+  let changed = false
+  const replacements = new Map<string, string>()
+  for (const [userID, before] of previousAssistants) {
+    const after = nextAssistants.get(userID)
+    if (previousAssistantCounts.get(userID) !== 1 || nextAssistantCounts.get(userID) !== 1
+      || before.length !== 1 || after?.length !== 1) continue
+    const previousText = piStableAssistantKey(before[0])?.slice("text:".length)
+    const nextText = piStableAssistantKey(after[0])?.slice("text:".length)
+    if (!previousText || !nextText || previousText === nextText) continue
+    if (!previousText.startsWith(nextText) && !nextText.startsWith(previousText)) continue
+    replacements.set(after[0].info.id, before[0].info.id)
+  }
+  if (!replacements.size) return next
+
+  const usedIDs = new Set<string>()
+  const stabilized = next.map((message) => {
+    const stableID = replacements.get(message.info.id)
+    if (!stableID || usedIDs.has(stableID)) return message
+    usedIDs.add(stableID)
+    changed = true
+    return {
+      ...message,
+      info: { ...message.info, id: stableID },
+      parts: message.parts.map((part) => ({ ...part, messageID: stableID }))
+    }
+  })
+  return changed ? stabilized : next
 }
 
 function piStableErrorTurnKey(
@@ -182,6 +281,7 @@ export function stabilizePiTailMessageIDs(
   // Stabilise the prompt first. Terminal errors can then be matched to that stable prompt identity
   // even when PI changes both the assistant id and the provider-specific error sentence on flush.
   let stabilized = stabilizePiMessagesByKey(previous, next, piStableUserKey)
+  stabilized = stabilizePiProgressiveAssistantIDs(previous, stabilized)
   stabilized = stabilizePiMessagesByKey(previous, stabilized, piStableAssistantKey)
   stabilized = stabilizePiMessagesByKey(previous, stabilized, piStableErrorTurnKey)
   return stabilized
@@ -192,6 +292,64 @@ function stabilizePiTailPage(entry: NativeConversationEntry, page: MessagePage, 
   const messages = stabilizePiTailMessageIDs(entry.piTailMessages, page.messages)
   entry.piTailMessages = messages
   return messages === page.messages ? page : { ...page, messages }
+}
+
+/**
+ * OpenCode 2 switches a live turn's transport identity when it settles: the bridge serves the ACP
+ * stream while the turn runs, then the harness journal under native `msg_...` ids once it is idle.
+ * The feed merge treats an unseen id as a new message, so the same prompt appears twice and the
+ * journal's final envelope hangs off the invisible copy. Reuse the previous page's user-message id
+ * for the same prompt, one-to-one and nearest in time; genuinely new prompts keep their own id.
+ */
+function stabilizeOpenCode2TailPage(entry: NativeConversationEntry, page: MessagePage, before?: string): MessagePage {
+  if (entry.target.backend !== "opencode2" || before) return page
+  const previousUsers = entry.openCode2TailMessages
+    .filter((message) => message.info.role === "user" && message.info.id)
+    .map((message) => ({
+      id: message.info.id,
+      prompt: visiblePrompt(message),
+      created: Number(message.info.time?.created) || 0,
+      used: false
+    }))
+  const pageIDs = new Set(page.messages.map((message) => message.info.id))
+  let changed = false
+  const messages = page.messages.map((message) => {
+    if (message.info.role !== "user" || !message.info.id) return message
+    const prompt = visiblePrompt(message)
+    if (!prompt) return message
+    const created = Number(message.info.time?.created) || 0
+    let best: (typeof previousUsers)[number] | undefined
+    let bestDistance = Number.POSITIVE_INFINITY
+    for (const candidate of previousUsers) {
+      if (candidate.used || candidate.prompt !== prompt) continue
+      // The previous identity is already a different message on this page: it belongs to that
+      // occurrence, not to this one.
+      if (candidate.id !== message.info.id && pageIDs.has(candidate.id)) continue
+      const distance = created && candidate.created ? Math.abs(created - candidate.created) : 0
+      if (distance > PENDING_TRANSCRIPT_CLOCK_SKEW_MS || distance >= bestDistance) continue
+      best = candidate
+      bestDistance = distance
+    }
+    if (!best) return message
+    best.used = true
+    if (best.id === message.info.id) return message
+    changed = true
+    const stableID = best.id
+    return {
+      ...message,
+      info: { ...message.info, id: stableID },
+      parts: message.parts.map((part) => part.messageID === message.info.id ? { ...part, messageID: stableID } : part)
+    }
+  })
+  entry.openCode2TailMessages = changed ? messages : page.messages
+  return changed ? { ...page, messages } : page
+}
+
+function stabilizeTailPage(entry: NativeConversationEntry, page: MessagePage, before?: string): MessagePage {
+  if (before) return page
+  if (entry.target.backend === "pi") return stabilizePiTailPage(entry, page, before)
+  if (entry.target.backend === "opencode2") return stabilizeOpenCode2TailPage(entry, page, before)
+  return page
 }
 
 /**
@@ -224,7 +382,7 @@ function sameModel(left: ModelSelection | null, right: ModelSelection | null): b
 }
 
 /** Backends whose transcript reads report the Session's own current model on the page itself. */
-const PAGE_MODEL_BACKENDS = new Set(["opencode", "codex", "omp"])
+const PAGE_MODEL_BACKENDS = new Set(["opencode", "opencode2", "codex", "omp", "copilot", "mimo"])
 
 /**
  * Model enrichment is not a mount-only read. A user can leave immediately after Send, before the
@@ -270,9 +428,13 @@ function reconcileNativeSessionModel(entry: NativeConversationEntry, page: Messa
  * between the browser and OpenCode cannot attach an older completed assistant to a new turn.
  */
 function reconcileOpenCodeTranscriptStatus(entry: NativeConversationEntry, page: MessagePage, before?: string): void {
-  if (entry.target.backend !== "opencode" || before) return
+  if (!usesOpenCodeLifecycle(entry.target.backend) || before) return
   const recoveryWatchActive = entry.openCodeRecoveryWatchUntil > Date.now()
-  if (entry.forcedStatus !== "running" && !recoveryWatchActive) return
+  // A turn does not have to be started by this view to become terminal here. When the Session is
+  // being driven by the desktop app, discovery reports its busy status and the mounted detail must
+  // leave Working as soon as that exact turn's final envelope is durable.
+  const turnActive = entry.forcedStatus === "running" || nativeSessionIsWorking(entry.statusType)
+  if (!turnActive && !recoveryWatchActive) return
 
   const now = Date.now()
   const latestAssistant = latestOpenCodeAssistantForCurrentTurn(entry, page)
@@ -292,7 +454,7 @@ function reconcileOpenCodeTranscriptStatus(entry: NativeConversationEntry, page:
     // but let the transcript supply the second observation when /session/status omits this Session.
     // A real busy status clears openCodeIdleObservedAt in refreshStatus(), so active retries cannot
     // be completed by this fallback while the status endpoint is actually reporting them.
-    if (!terminalError || entry.forcedStatus !== "running") return
+    if (!terminalError || !turnActive) return
     if (entry.openCodeIdleObservedAt === null) {
       entry.openCodeIdleObservedAt = now
       return
@@ -348,7 +510,7 @@ function clearOpenCodeSilentTurn(entry: NativeConversationEntry): void {
 }
 
 function armOpenCodeSilentTurnRecovery(entry: NativeConversationEntry, turnID: string): void {
-  if (entry.target.backend !== "opencode") return
+  if (!usesOpenCodeLifecycle(entry.target.backend)) return
   clearOpenCodeSilentTurn(entry)
   const timer = setTimeout(() => {
     void settleOpenCodeSilentTurn(entry, turnID)
@@ -361,7 +523,7 @@ async function settleOpenCodeSilentTurn(entry: NativeConversationEntry, turnID: 
   entry.openCodeSilentTurn = null
   const orderedTurns = [...entry.turns.values()].sort((left, right) => left.created - right.created || left.id.localeCompare(right.id))
   const newestTurn = orderedTurns[orderedTurns.length - 1]
-  if (entry.target.backend !== "opencode" || newestTurn?.id !== turnID) return
+  if (!usesOpenCodeLifecycle(entry.target.backend) || newestTurn?.id !== turnID) return
 
   const retry = () => {
     const ordered = [...entry.turns.values()].sort((left, right) => left.created - right.created || left.id.localeCompare(right.id))
@@ -515,23 +677,80 @@ function notifyTranscript(entry: NativeConversationEntry): void {
 
 function captureUserTurns(entry: NativeConversationEntry, page: MessagePage, before?: string): void {
   // The first page describes the Session state that existed when the v3 controller mounted. Older
-  // pages are admitted when the user explicitly pages backward. Tail refreshes do not manufacture
-  // new turns from replay IDs: new HR prompts already have one accepted client operation identity.
-  const mayDiscoverRuns = !entry.initialPageCaptured || Boolean(before)
+  // pages are admitted when the user explicitly pages backward. Codex and OpenCode 2 Sessions can
+  // continue in the desktop app while this view stays open: each newly persisted user envelope must
+  // become a turn here as well, or its assistant messages have no turn to attach to in the timeline.
+  const tailDiscoversRuns = entry.target.backend === "codex" || entry.target.backend === "opencode2"
+  const mayDiscoverRuns = !entry.initialPageCaptured || Boolean(before) || tailDiscoversRuns
   if (!mayDiscoverRuns) return
 
+  // A tail page is also the only place a transport identity change becomes visible. Bind an unseen
+  // native user row to the turn already representing the same prompt when that turn's own id is no
+  // longer on the page, rather than minting a duplicate from the new id space. Only OpenCode 2 changes
+  // id space mid-Session; Codex ids are stable, so a matching prompt there is a genuine repeat.
+  const reconcileIdentities = entry.target.backend === "opencode2" && entry.initialPageCaptured && !before
+  const pageUserIDs = new Set(page.messages
+    .filter((message) => message.info.role === "user" && message.info.id)
+    .map((message) => message.info.id))
+  const claimedTurns = new Set<string>()
   let changed = false
   for (const message of page.messages) {
     if (message.info.role !== "user" || !message.info.id) continue
+    // A queued prompt is not a turn yet; reconcileQueuedPrompts hands it over once it starts.
+    if (message.info.queued === true) continue
     const prompt = visiblePrompt(message)
     if (!prompt) continue
     const id = `${conversationID(entry.target)}:native-user:${message.info.id}`
-    if (
-      entry.turns.has(id)
-      || [...entry.turns.values()].some((turn) => turn.nativeMessageID === message.info.id)
-    ) continue
+    if (entry.turns.has(id)) {
+      claimedTurns.add(id)
+      continue
+    }
+    const nativeBound = [...entry.turns.values()].find((turn) => turn.nativeMessageID === message.info.id)
+    if (nativeBound) {
+      claimedTurns.add(nativeBound.id)
+      continue
+    }
     const created = Number(message.info.time?.created) || entry.createdAt
+    if (reconcileIdentities) {
+      let reusable: NativeTurnRecord | undefined
+      let reusableDistance = Number.POSITIVE_INFINITY
+      for (const turn of entry.turns.values()) {
+        if (claimedTurns.has(turn.id) || canonicalText(turn.prompt) !== prompt) continue
+        // An id still present on the page belongs to that other occurrence; only a turn whose
+        // previous identity has disappeared can be the same message under a new transport id.
+        if (turn.nativeMessageID && pageUserIDs.has(turn.nativeMessageID)) continue
+        // An accepted request row is the next native envelope for that exact prompt; its local
+        // accept clock need not agree with the harness journal's timestamp.
+        const acceptedTurn = turn.id.includes(":request:") && !turn.nativeMessageID
+        const distance = Math.abs(turn.created - created)
+        if (!acceptedTurn && distance > PENDING_TRANSCRIPT_CLOCK_SKEW_MS) continue
+        if (distance >= reusableDistance) continue
+        reusable = turn
+        reusableDistance = distance
+      }
+      if (reusable) {
+        reusable.nativeMessageID = message.info.id
+        claimedTurns.add(reusable.id)
+        changed = true
+        continue
+      }
+    }
+    // A prompt sent from this view already has a durable request identity. Its native user row can
+    // arrive on a later tail read; bind that row to the accepted turn instead of drawing it twice.
+    const accepted = tailDiscoversRuns
+      ? [...entry.turns.values()].reverse().find((turn) =>
+        turn.id.includes(":request:") && !turn.nativeMessageID
+        && canonicalText(turn.prompt) === prompt
+        && Math.abs(turn.created - created) <= PENDING_TRANSCRIPT_CLOCK_SKEW_MS
+      )
+      : undefined
+    if (accepted) {
+      accepted.nativeMessageID = message.info.id
+      claimedTurns.add(accepted.id)
+      continue
+    }
     entry.turns.set(id, { id, prompt, created, model: entry.currentModel, nativeMessageID: message.info.id })
+    claimedTurns.add(id)
     entry.createdAt = Math.min(entry.createdAt, created)
     entry.updatedAt = Math.max(entry.updatedAt, created)
     changed = true
@@ -562,6 +781,7 @@ function reconcilePendingPromptFromTranscript(entry: NativeConversationEntry, pa
   for (let index = page.messages.length - 1; index >= 0; index -= 1) {
     const message = page.messages[index]
     if (message.info.role !== "user" || !message.info.id) continue
+    if (message.info.queued === true) continue
     if (visiblePrompt(message) !== prompt) continue
     const alreadyClaimed = [...entry.turns.values()].some((turn) => turn.nativeMessageID === message.info.id)
     if (alreadyClaimed) continue
@@ -599,14 +819,14 @@ function reconcilePendingPromptFromTranscript(entry: NativeConversationEntry, pa
     const message = page.messages[index]
     if (message.info.role === "user") break
     if (message.info.role === "assistant") latestAssistant = message
-    if (entry.target.backend === "opencode" || !nativeAssistantCompleted(message)) continue
+    if (usesOpenCodeLifecycle(entry.target.backend) || !nativeAssistantCompleted(message)) continue
     completed = true
     completedAt = Math.max(
       completedAt,
       Number(message.info.time?.completed) || Number(message.info.time?.created) || 0
     )
   }
-  if (entry.target.backend === "opencode" && latestAssistant) {
+  if (usesOpenCodeLifecycle(entry.target.backend) && latestAssistant) {
     completed = openCodeAssistantProvesTurnCompleted(latestAssistant)
     if (completed) {
       completedAt = Number(latestAssistant.info.time?.completed) || Number(latestAssistant.info.time?.created) || 0
@@ -629,6 +849,54 @@ function reconcilePendingPromptFromTranscript(entry: NativeConversationEntry, pa
   notify(entry)
 }
 
+/**
+ * A queued prompt is not a turn. Its row carries `info.queued` and the conversation keeps tracking
+ * the turn that is running, so every reply, "getting started" and "working" state stays on that turn.
+ * When the daemon dequeues the prompt the flag clears, and only then does it become the newest turn.
+ *
+ * Tail pages also adopt queued rows this controller never sent - another client, or an app reload
+ * while one was waiting - so the hand-over never depends on in-memory send state. A row that vanished
+ * from a live page was discarded by a Stop; one missing from an idle page has run, because idle pages
+ * can come from the harness journal under the harness's own ids.
+ */
+function reconcileQueuedPrompts(entry: NativeConversationEntry, page: MessagePage, before?: string): void {
+  if (before) return
+  const byID = new Map(page.messages.map((message) => [message.info.id, message]))
+  for (const message of page.messages) {
+    if (message.info.role !== "user" || message.info.queued !== true || !message.info.id) continue
+    const tracked = entry.queuedPrompts.get(message.info.id)
+    if (tracked) {
+      tracked.seen = true
+      continue
+    }
+    if ([...entry.turns.values()].some((turn) => turn.nativeMessageID === message.info.id)) continue
+    const prompt = visiblePrompt(message)
+    if (prompt) entry.queuedPrompts.set(message.info.id, { prompt, model: entry.currentModel, seen: true })
+  }
+  if (!entry.queuedPrompts.size) return
+
+  const working = entry.forcedStatus === "running" || nativeSessionIsWorking(entry.statusType)
+  let started = 0
+  for (const [messageID, queued] of [...entry.queuedPrompts]) {
+    const message = byID.get(messageID)
+    if (message?.info.queued === true) continue
+    if (!message && working) {
+      if (queued.seen) entry.queuedPrompts.delete(messageID)
+      continue
+    }
+    entry.queuedPrompts.delete(messageID)
+    const scope = conversationID(entry.target)
+    const id = queued.clientRequestId ? `${scope}:request:${queued.clientRequestId}` : `${scope}:native-user:${messageID}`
+    if (entry.turns.has(id)) continue
+    // Later than every turn already known, in queue order: the newest turn is the current one.
+    const created = Math.max(Date.now(), ...[...entry.turns.values()].map((turn) => turn.created + 1)) + started
+    entry.turns.set(id, { id, prompt: queued.prompt, created, model: queued.model, ...(message ? { nativeMessageID: messageID } : {}) })
+    entry.updatedAt = Math.max(entry.updatedAt, created)
+    started += 1
+  }
+  if (started) notify(entry)
+}
+
 async function reconcilePromptAfterTransportFailure(entry: NativeConversationEntry): Promise<ConversationRuntime | null> {
   const pending = loadPendingNativeSessionPrompt(entry.target)
   if (!pending) return null
@@ -643,9 +911,10 @@ async function reconcilePromptAfterTransportFailure(entry: NativeConversationEnt
       200,
       true
     )
-    page = stabilizePiTailPage(entry, page)
+    page = stabilizeTailPage(entry, page)
     reconcilePendingPromptFromTranscript(entry, page)
     captureUserTurns(entry, page)
+    reconcileQueuedPrompts(entry, page)
     reconcileOpenCodeTranscriptStatus(entry, page)
     reconcileNativeSessionModel(entry, page)
   } catch {
@@ -658,11 +927,11 @@ async function reconcilePromptAfterTransportFailure(entry: NativeConversationEnt
   return entry.turns.has(expectedTurnID) ? conversationSnapshot(entry) : null
 }
 
-function appendAcceptedTurn(entry: NativeConversationEntry, prompt: string, model: ModelSelection | null, clientRequestId: string): ConversationRuntime {
+function appendAcceptedTurn(entry: NativeConversationEntry, prompt: string, model: ModelSelection | null, clientRequestId: string, nativeMessageID?: string): ConversationRuntime {
   const id = `${conversationID(entry.target)}:request:${clientRequestId}`
   if (!entry.turns.has(id)) {
     const created = Date.now()
-    entry.turns.set(id, { id, prompt: canonicalText(prompt), created, model })
+    entry.turns.set(id, { id, prompt: canonicalText(prompt), created, model, ...(nativeMessageID ? { nativeMessageID } : {}) })
     entry.updatedAt = created
   }
   entry.currentModel = model
@@ -687,16 +956,19 @@ async function refreshStatus(entry: NativeConversationEntry): Promise<void> {
   // until the durable transcript proves a final answer or the bounded silent-turn recovery converts
   // stable idle/no-final state into an explicit failure.
   const now = Date.now()
-  const openCodeRecoveryWatchActive = entry.target.backend === "opencode"
+  const openCodeRecoveryWatchActive = usesOpenCodeLifecycle(entry.target.backend)
     && entry.openCodeRecoveryWatchUntil > now
-  if (entry.target.backend === "opencode" && entry.forcedStatus !== "running" && !openCodeRecoveryWatchActive) return
+  const openCodeTurnActive = entry.forcedStatus === "running" || nativeSessionIsWorking(entry.statusType)
+  if (usesOpenCodeLifecycle(entry.target.backend)
+    && !openCodeTurnActive
+    && !openCodeRecoveryWatchActive) return
 
   try {
     const statuses = await api.listStatuses(entry.target.config)
     const next = statuses[entry.target.sessionID]?.type
     if (typeof next !== "string" || !next) return
 
-    if (entry.target.backend === "opencode") {
+    if (usesOpenCodeLifecycle(entry.target.backend)) {
       if (nativeSessionIsWorking(next)) {
         entry.statusType = next
         entry.error = null
@@ -709,7 +981,20 @@ async function refreshStatus(entry: NativeConversationEntry): Promise<void> {
       }
       // Once an explicit no-final failure has been confirmed, another idle observation during the
       // recovery watch changes nothing. A later busy edge is the only signal that may resurrect it.
-      if (entry.forcedStatus !== "running") return
+      if (entry.forcedStatus !== "running") {
+        // An external turn has no optimistic request state to keep alive. Native idle alone still
+        // does not prove a final answer exists, so let the durable transcript settle it; the periodic
+        // mounted reconcile keeps reading that tail while this status remains working.
+        if (entry.openCodeIdleObservedAt === null) entry.openCodeIdleObservedAt = now
+        // A turn that stopped without final text (aborted elsewhere, reasoning-only) would otherwise
+        // stay Working forever. After the same grace an own prompt gets, trust stable native idle.
+        if (now - entry.openCodeIdleObservedAt >= OPENCODE_SILENT_TURN_GRACE_MS && nativeSessionIsWorking(entry.statusType)) {
+          entry.statusType = next
+          entry.openCodeIdleObservedAt = null
+          notify(entry)
+        }
+        return
+      }
       if (entry.openCodeIdleObservedAt === null) {
         entry.openCodeIdleObservedAt = now
         return
@@ -771,9 +1056,10 @@ function nativeConversationController(entry: NativeConversationEntry): Conversat
       let page = await api.loadMessagePage(config, sessionID, directory, before, limit, refreshHistory)
       const activeEntry = entryForRead(config, sessionID, directory)
       if (activeEntry === entry) {
-        page = stabilizePiTailPage(entry, page, before)
+        page = stabilizeTailPage(entry, page, before)
         reconcilePendingPromptFromTranscript(entry, page, before)
         captureUserTurns(entry, page, before)
+        reconcileQueuedPrompts(entry, page, before)
         reconcileOpenCodeTranscriptStatus(entry, page, before)
         reconcileNativeSessionModel(entry, page, before)
       }
@@ -811,7 +1097,28 @@ function nativeConversationController(entry: NativeConversationEntry): Conversat
       if (result.status !== "accepted") {
         throw new Error(`${body.command ? "Command" : "Prompt"} delivery is ${result.status}. Retry the same request to reconcile the existing request id.`)
       }
-      return appendAcceptedTurn(entry, prompt, model ?? null, result.clientRequestId)
+      // A queued prompt is not a turn yet: the conversation keeps tracking the turn that is running,
+      // and the prompt becomes a turn when the transcript shows the daemon started it.
+      if (result.outcome?.disposition === "queued" && result.outcome.messageID) {
+        entry.queuedPrompts.set(result.outcome.messageID, {
+          prompt: canonicalText(prompt),
+          model: model ?? null,
+          clientRequestId: result.clientRequestId,
+          seen: false
+        })
+        entry.error = null
+        notifyTranscript(entry)
+        return notify(entry)
+      }
+      return appendAcceptedTurn(entry, prompt, model ?? null, result.clientRequestId, result.outcome?.messageID)
+    },
+
+    async cancelQueuedPrompt(_config, conversationId, messageID) {
+      requireConversationScope(entry, conversationId)
+      await ensureWriter(entry)
+      await api.cancelQueuedPrompt(entry.target.config, entry.target.sessionID, messageID, entry.target.directory)
+      entry.queuedPrompts.delete(messageID)
+      notifyTranscript(entry)
     },
 
     async stopConversation(_config, conversationId) {
@@ -826,6 +1133,8 @@ function nativeConversationController(entry: NativeConversationEntry): Conversat
       }
       entry.forcedStatus = "cancelled"
       entry.error = null
+      // A Stop discards everything still queued behind the turn, in the daemon as here.
+      entry.queuedPrompts.clear()
       clearOpenCodeSilentTurn(entry)
       entry.statusType = "idle"
       entry.openCodeIdleObservedAt = null
@@ -858,9 +1167,11 @@ export function registerNativeSessionV3Adapter(
       error: null,
       initialPageCaptured: false,
       piTailMessages: [],
+      openCode2TailMessages: [],
       writerReady: !target.requiresExplicitClaim,
       writerClaimInFlight: null,
       turns: new Map(),
+      queuedPrompts: new Map(),
       listeners: new Set(),
       transcriptListeners: new Set()
     }
