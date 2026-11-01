@@ -5,8 +5,22 @@ import {
   discoverMachineNativeSessions,
   NativeSessionDiscoveryTimeoutError,
   nativeSessionConfig,
+  selectReadyNativeSessionSources,
   nativeSessionSurfaceTarget
 } from './native-session-discovery.ts'
+
+const onlineMachine = { machine: { id: 'reachable' }, state: 'online' }
+const probingMachine = { machine: { id: 'unreachable' }, state: 'loading' }
+const earlyDiscovery = selectReadyNativeSessionSources([onlineMachine, probingMachine])
+assert.equal(earlyDiscovery.ready, true, 'one settled machine must let native Session discovery proceed')
+assert.deepEqual(earlyDiscovery.sources, [onlineMachine], 'discovery must include the online machine without waiting for its loading sibling')
+
+const completedDiscovery = selectReadyNativeSessionSources([
+  onlineMachine,
+  { ...probingMachine, state: 'offline' }
+])
+assert.deepEqual(completedDiscovery.sources.map(({ machine }) => machine.id), ['reachable', 'unreachable'], 'a later-settled machine joins the next discovery pass')
+assert.equal(selectReadyNativeSessionSources([probingMachine]).ready, false, 'discovery still waits when every configured machine is probing')
 
 const base = {
   backend: 'opencode',
@@ -222,11 +236,14 @@ assert.deepEqual(page.records[0].status, { type: "idle" })
 assert.equal(page.nextCursor, "tail")
 
 const nonPaginatedAgents = [
-  { id: "opencode", label: "OpenCode", backend: "opencode", transport: "http" },
+  { id: "opencode", label: "OpenCode Legacy", backend: "opencode", transport: "http" },
+  { id: "opencode2", label: "OpenCode 2", backend: "opencode2", transport: "acp" },
   { id: "omp", label: "Oh My Pi", backend: "omp", transport: "acp" },
   { id: "pi", label: "PI", backend: "pi", transport: "acp" },
   { id: "claude", label: "Claude Code", backend: "claude", transport: "acp" },
-  { id: "codex", label: "Codex", backend: "codex", transport: "acp" }
+  { id: "codex", label: "Codex", backend: "codex", transport: "acp" },
+  { id: "copilot", label: "GitHub Copilot CLI", backend: "copilot", transport: "acp" },
+  { id: "mimo", label: "MiMo Code", backend: "mimo", transport: "acp" }
 ].map((agent) => ({
   ...agent,
   managed: true,
