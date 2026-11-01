@@ -10,17 +10,12 @@ const read = (name) => readFileSync(path.join(here, name), "utf8").replace(/\r\n
 const MOBILE_SHEETS = [
   "taskdesk-mobile-navigation.css",
   "conversation-control-plane-overrides.css",
-  "conversation-control-plane-mobile-polish.css",
-  "v3-mobile-regression-fixes.css",
-  "v3-mobile-landscape-grid-fix.css",
-  "v3-mobile-workspace-switcher-polish.css",
-  "v3-mobile-a11y-fix.css",
-  "v3-mobile-product-parity.css",
+  "v3-mobile.css",
   "session-first-navigation.css",
   "session-first-workbench.css"
 ]
 
-const parity = read("v3-mobile-product-parity.css")
+const parity = read("v3-mobile.css")
 const workbench = read("session-first-workbench.css")
 const standalone = read("components/standalone-universal-workspace.tsx")
 const conversation = read("components/taskdesk-conversation.tsx")
@@ -66,11 +61,11 @@ test("native Session transcript typography is scoped to the Session observer", (
 })
 
 test("a detected harness reads consistently in the mobile machine list", () => {
-  assert.match(machineClient, /export function machineAgentStateLabel\(state: string\): string \{/)
-  assert.match(machineClient, /if \(state === "configured"\) return "Ready"/)
-  assert.match(machineClient, /if \(state === "available"\) return "Running"/)
-  assert.match(standalone, /import \{ discoverMachine, machineAgentStateLabel \} from "\.\.\/machineClient"/)
-  assert.match(standalone, /\{machineAgentStateLabel\(agent\.state\)\}/)
+  assert.match(machineClient, /export function machineAgentStateLabel\(state: string, t: Translator = createTranslator\("en"\)\): string \{/)
+  assert.match(machineClient, /if \(state === "configured"\) return t\("machine\.agentReady"\)/)
+  assert.match(machineClient, /if \(state === "available"\) return t\("machine\.agentRunning"\)/)
+  assert.match(standalone, /import \{ discoverMachine, listMachineProjects, machineAgentStateLabel \} from "\.\.\/machineClient"/)
+  assert.match(standalone, /\{machineAgentStateLabel\(agent\.state, t\)\}/)
   assert.match(standalone, /<i className=\{agent\.state\} aria-hidden="true" \/>/)
 })
 

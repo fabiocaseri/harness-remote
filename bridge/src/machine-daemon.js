@@ -1,10 +1,12 @@
+import { realpath } from "node:fs/promises"
+import path from "node:path"
 import { createAgentRoutingServer } from "./agent-router.js"
 import { createAgentModelServer } from "./agent-model-server.js"
 import { createCrossMachineHandoffServer } from "./cross-machine-handoff-server.js"
 import { createCrossMachineTargetRuntime } from "./cross-machine-target-runtime.js"
 import { MachineRegistry, trackAgentHostLifecycle } from "./machine-registry.js"
 import { trackManagedHostLifecycle } from "./opencode-host.js"
-import { discoverProjects } from "./project-catalog.js"
+import { discoverProjects, insideRoot } from "./project-catalog.js"
 import { createBridgeServer } from "./server.js"
 import { createSessionClaimServer } from "./session-claim-server.js"
 import { SessionLinkStore } from "./session-link-store.js"
@@ -177,11 +179,13 @@ export class MachineDaemon {
   }
 
   close() {
+    const closing = []
     for (const entry of this.hosts.values()) {
-      entry.modelCatalog?.close?.()
-      if (entry.kind === "acp") entry.host.close?.()
-      else entry.host.stop?.("SIGTERM")
+      closing.push(entry.modelCatalog?.close?.())
+      if (entry.kind === "acp") closing.push(entry.host.close?.())
+      else closing.push(entry.host.stop?.("SIGTERM"))
     }
+    return Promise.allSettled(closing)
   }
 }
 
@@ -290,8 +294,10 @@ export function createMachineDaemonServer({
       // place that already loads configOptions, orders the model before its variant, and defers both
       // to dequeue when a turn is still running. Setting them here directly reordered the model
       // after the variant and mutated a live turn's configuration.
-      await service.prompt(sessionID, text, modelWireName(resolvedModel), acpPromptAttachments(attachments), acpModelVariant(resolvedModel))
-      return
+      // The disposition (started, queued or steered) travels back in the mutation result, so the app
+      // shows a queued prompt as waiting from the daemon's word rather than guessing from timing.
+      const outcome = await service.prompt(sessionID, text, modelWireName(resolvedModel), acpPromptAttachments(attachments), acpModelVariant(resolvedModel))
+      return outcome?.disposition ? { disposition: outcome.disposition, messageID: outcome.messageID } : undefined
     }
 
     const host = entry.host
@@ -345,8 +351,8 @@ export function createMachineDaemonServer({
     if (entry.kind === "acp") {
       const service = acpService(agentID)
       if (!service) throw daemonError("session_unavailable", `Agent ${agentID} cannot load native Sessions`)
-      await service.prompt(sessionID, text, modelWireName(resolvedModel), [], acpModelVariant(resolvedModel))
-      return
+      const outcome = await service.prompt(sessionID, text, modelWireName(resolvedModel), [], acpModelVariant(resolvedModel))
+      return outcome?.disposition ? { disposition: outcome.disposition, messageID: outcome.messageID } : undefined
     }
 
     const host = entry.host
@@ -511,12 +517,27 @@ export function createMachineDaemonServer({
     return handoffResultForTarget(sourceAgentID, sourceSessionID, input.targetAgentID, input.directory, candidates[0].id)
   }
 
+  const assertHandoffDirectory = async (directory) => {
+    const resolved = await realpath(directory).catch(() => undefined)
+    if (resolved) {
+      for (const root of [...roots, path.join(stateDirectory, "worktrees")]) {
+        const resolvedRoot = await realpath(root).catch(() => undefined)
+        if (resolvedRoot && insideRoot(resolvedRoot, resolved)) return
+      }
+    }
+    throw daemonError("invalid_request", "Native Session handoff directory is outside the configured --root boundary")
+  }
+
   const handoffSession = async (
     sourceAgentID,
     sourceSessionID,
     { targetAgentID, directory, model, variant, title },
     { checkpoint } = {}
   ) => {
+    // Handoff creates a new agent Session with this cwd, so it gets the same --root boundary as
+    // POST /session, plus this daemon's managed Task worktrees. The caller's string stays the
+    // Session identity; only its resolved form is checked.
+    await assertHandoffDirectory(directory)
     const sourceEntry = daemon.hostEntry(sourceAgentID)
     if (!sourceEntry) throw daemonError("unknown_agent", `Unknown source agent: ${sourceAgentID}`)
     const targetEntry = daemon.hostEntry(targetAgentID)
