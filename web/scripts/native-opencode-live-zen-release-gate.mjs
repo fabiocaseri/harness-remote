@@ -234,14 +234,14 @@ async function openSession(targetPage) {
 }
 
 async function waitReady(targetPage, timeout = 120_000) {
-  await targetPage.locator(".tdw-conversation-state.ready").waitFor({ state: "attached", timeout })
+  await targetPage.locator(".tdw-conversation-state.ready:visible").waitFor({ state: "visible", timeout })
   const composer = targetPage.getByRole("textbox", { name: "Message OpenCode" })
   await composer.waitFor({ state: "visible", timeout: 20_000 })
   await waitFor("enabled composer", async () => !(await composer.isDisabled()), 20_000, 150)
 }
 
 const finalLocator = (targetPage, token) => targetPage.locator(".uw-message-agent:not(.uw-message-pending) .uw-message-content-group .uw-markdown").filter({ hasText: token })
-const reasoningLocator = (targetPage, token) => targetPage.locator(".uw-message-agent .uw-activity-group .uw-reasoning").filter({ hasText: token })
+const reasoningLocator = (targetPage, token) => targetPage.locator(".uw-message-agent .hr-activity .hr-act-thought").filter({ hasText: token })
 
 async function waitVisibleFinal(targetPage, token, timeout = 30_000) {
   const locator = finalLocator(targetPage, token)
@@ -275,7 +275,7 @@ async function sendUI(token) {
       assert.equal(await finalLocator(page, token).count(), 1, `${token}: UI final duplicated`)
       return
     }
-    if (await page.locator(".tdw-conversation-state.ready").count() && await reasoningLocator(page, token).count()) {
+    if (await page.locator(".tdw-conversation-state.ready:visible").count() && await reasoningLocator(page, token).count()) {
       throw new Error(`${token}: Ready with requested output only in reasoning/activity, no final answer`)
     }
     await page.waitForTimeout(400)
@@ -351,8 +351,8 @@ try {
     assert.equal(await finalLocator(page, token).count(), 1, `${token}: UI final missing/duplicated at end`)
   }
   assert.equal(await page.locator(".uw-message-pending").count(), 0, "pending assistant row remains")
-  assert.equal(await page.locator(".tdw-conversation-state.working").count(), 0, "Session remains Working")
-  assert.equal(await page.locator(".uw-activity-group.uw-tool-running").count(), 0, "Activity remains running")
+  assert.equal(await page.locator(".tdw-conversation-state.working:visible").count(), 0, "Session remains Working")
+  assert.equal(await page.locator(".hr-activity.is-running").count(), 0, "Activity remains running")
 
   await page.screenshot({ path: path.join(artifacts, "live-opencode-release-passed.png"), fullPage: true })
   fs.writeFileSync(path.join(artifacts, "live-opencode-release-result.json"), `${JSON.stringify({ status: "passed", opencodeVersion: process.env.OPENCODE_TEST_VERSION || "unknown", chosenModel, probeAttempts, sessionID, turns: TOKENS.length }, null, 2)}\n`)
