@@ -6,6 +6,7 @@ import {
   LIVE_SESSION_STATUS_GRACE_MS,
   clearSessionIndexLiveError,
   clearSessionIndexLiveState,
+  clearSessionIndexLiveStatuses,
   liveSessionIndexError,
   liveSessionIndexStatus,
   noteSessionIndexLiveEvent,
@@ -68,6 +69,25 @@ test("OpenCode lifecycle edges invalidate the Session index while token chunks d
   assert.equal(notifications, 1, "a lifecycle edge must invalidate the Session rail directly")
   assert.deepEqual(observedStatus, { type: "busy" }, "the invalidation subscriber must observe the already-updated live status")
   assert.equal(sessionIndexLifecycleEvent("session.status"), true)
+  unsubscribe()
+})
+
+test("an ACP turn end invalidates the Session index while its per-chunk message.updated does not", () => {
+  const omp = { ...base, backend: "omp", agentId: "omp" }
+  let notifications = 0
+  const unsubscribe = subscribeSessionIndexInvalidation(() => { notifications += 1 })
+
+  // The bridge's own envelope, as AcpService emits it while streaming and when the turn settles.
+  for (let index = 0; index < 50; index += 1) {
+    noteSessionIndexLiveEvent(omp, taskDeskLiveEvent("message.updated", { type: "message.updated", sessionId: "omp_a" }))
+  }
+  assert.equal(notifications, 0, "ACP streams message.updated per chunk; it must not re-read every Session index")
+
+  noteSessionIndexLiveEvent(omp, taskDeskLiveEvent("session.updated", { type: "session.updated", sessionId: "omp_a" }))
+  assert.equal(notifications, 1, "the session.updated that ends an ACP turn must reach the rail")
+
+  noteSessionIndexLiveEvent(base, { type: "message.updated", sessionID: "ses_a" })
+  assert.equal(notifications, 2, "OpenCode's terminal message.updated keeps its second chance")
   unsubscribe()
 })
 
@@ -267,4 +287,25 @@ test("durable controller transitions can retire stale event authority explicitly
   assert.equal(liveSessionIndexError(base, sessionID), undefined)
   assert.equal(liveSessionIndexStatus(base, sessionID), undefined)
   assert.equal(sessionIndexInvalidationRevision(), beforeSettlement + 1, "durable terminal reconciliation must retire both status and error bridges")
+})
+
+test("a foregrounded surface drops every transient status without retiring a terminal error", () => {
+  const foreground = { ...base, agentId: "foreground" }
+  noteSessionIndexLiveEvent(foreground, { type: "session.status", sessionID: "ses_resume_busy", status: "busy" })
+  noteSessionIndexLiveEvent(foreground, { type: "session.error", sessionID: "ses_resume_error", errorMessage: "terminal failure" })
+  assert.deepEqual(liveSessionIndexStatus(foreground, "ses_resume_busy"), { type: "busy" })
+
+  const before = sessionIndexInvalidationRevision()
+  clearSessionIndexLiveStatuses()
+  assert.equal(
+    liveSessionIndexStatus(foreground, "ses_resume_busy"),
+    undefined,
+    "resume must drop the stale busy bridge so the fresh Session index speaks for native truth"
+  )
+  assert.equal(
+    liveSessionIndexError(foreground, "ses_resume_error"),
+    "terminal failure",
+    "a terminal error must survive a resume until durable transcript truth catches up"
+  )
+  assert.equal(sessionIndexInvalidationRevision(), before + 1, "dropping resume statuses must invalidate the rail once")
 })
