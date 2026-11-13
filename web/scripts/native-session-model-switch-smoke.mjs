@@ -383,7 +383,27 @@ async function waitFor(predicate, label, timeoutMs = 15_000) {
 
 async function openSession(page, title, marker) {
   await page.locator('.hr-native-workspace[aria-label="Sessions"]').waitFor({ state: "visible", timeout: 15_000 })
-  await page.getByRole("button", { name: new RegExp(title) }).click()
+  const target = page.getByRole("button", { name: new RegExp(title) })
+  try {
+    await target.click()
+  } catch (error) {
+    // Playwright occasionally reports a stable row as unstable on the Linux runner. Record why,
+    // then use a forced click: the model-routing assertions below are the purpose of this smoke,
+    // while row clickability itself is covered by the navigation and rail-state smokes.
+    const diagnostic = await target.evaluate((element) => {
+      const rect = element.getBoundingClientRect()
+      const atPoint = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)
+      return {
+        rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+        pointTag: atPoint?.tagName,
+        pointClass: typeof atPoint?.className === "string" ? atPoint.className : "",
+        disabled: element.disabled,
+        ariaDisabled: element.getAttribute("aria-disabled")
+      }
+    })
+    console.warn(`openSession(${title}) click diagnostic: ${JSON.stringify(diagnostic)}`)
+    await target.click({ force: true })
+  }
   await page.getByRole("heading", { name: title }).waitFor({ state: "visible", timeout: 15_000 })
   await page.locator(".tdw-work-thread-conversation").waitFor({ state: "visible", timeout: 15_000 })
   await page.getByText(marker, { exact: true }).first().waitFor({ state: "visible", timeout: 15_000 })
@@ -469,6 +489,8 @@ try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
   const page = await context.newPage()
   await page.addInitScript(({ key, port }) => {
+    // These smokes open Session rows directly; Classic keeps Projects expanded.
+    localStorage.setItem("harness-remote.skin", "classic")
     localStorage.setItem(key, JSON.stringify([{
       id: "machine-model-switch",
       name: "Model Switch Test",
@@ -490,7 +512,7 @@ try {
   assert.equal(await blockedComposer.isDisabled(), true, "composer must stay disabled while native models are still loading")
   assert.equal(await page.getByRole("button", { name: /^Send$/ }).isDisabled(), true, "Send must stay disabled while native models are still loading")
   assert.equal(await page.locator(".tdw-agent-control select").first().isDisabled(), true, "harness selector must stay disabled while native models are still loading")
-  assert.match(await page.locator(".tdw-conversation-state").innerText(), /Loading models|Waiting for model catalog/, "Session must expose model bootstrap instead of Ready")
+  assert.match(await page.locator(".tdw-conversation-state:visible").innerText(), /Loading models|Waiting for model catalog/, "Session must expose model bootstrap instead of Ready")
   releaseBlockedModelRead?.()
   await assertCatalog(page, ["pi-coding", "pi-reasoning"], ["omp-fast", "omp-deep"], "A")
   assert.equal(await blockedComposer.isDisabled(), false, "composer must enable automatically after the verified catalog arrives")
@@ -575,14 +597,15 @@ try {
   assert.equal(await routedControls.getByText("Machine", { exact: true }).count(), 0, "Session handoff must not expose a machine selector")
   assert.equal(await routedControls.getByText("Harness", { exact: true }).count(), 1, "Session handoff must expose one harness selector")
   assert.equal(await routedControls.getByText("Model", { exact: true }).count(), 1, "Session handoff must keep model selection")
-  assert.equal(await page.locator(".tdw-conversation-state").isVisible(), true, "routing controls must not hide the Session state")
+  assert.equal(await page.locator(".tdw-conversation-state:visible").isVisible(), true, "routing controls must not hide the Session state")
 
   // Harness + Model are one decision and must read as one compact control group. The routed container
   // used to inherit flex:1 while also declaring a 760px grid, so on a wide Session pane the unused
   // first track pushed Model noticeably to the right even though the Harness select itself stopped at
   // 220px. Lock the visible control-to-control gap, not just a CSS token, so cascade regressions fail.
+  // On a wide pane each label sits inline before its control, so the Model group starts at its label.
   const routingHarnessBox = await routedControls.locator("label").filter({ hasText: /^Harness/ }).locator("select").boundingBox()
-  const routingModelBox = await routedControls.locator(".tdw-model-trigger").boundingBox()
+  const routingModelBox = await routedControls.locator("label.tdw-model-control").boundingBox()
   const routingGroupBox = await routedControls.boundingBox()
   assert.ok(routingHarnessBox && routingModelBox && routingGroupBox, "routing controls must have measurable desktop geometry")
   const harnessToModelGap = routingModelBox.x - (routingHarnessBox.x + routingHarnessBox.width)
