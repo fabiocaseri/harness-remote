@@ -6,10 +6,16 @@ import path from "node:path"
 import test from "node:test"
 import {
   AcpAgentModelCatalog,
+  CachedCatalog,
   HttpAgentModelCatalog,
+  modelConfigOptionFromSessionResponse,
+  modelValueForSelection,
+  modelValueIsExcluded,
   modelsFromConfigOptions,
   modelsFromProvidersResponse,
-  modelsFromRuntimeProvidersResponse
+  modelsFromRuntimeProvidersResponse,
+  normalizedAcpModelCandidates,
+  splitInlineAcpModelVariant
 } from "../src/agent-model-catalog.js"
 
 class FakeAcp extends EventEmitter {
@@ -69,6 +75,120 @@ test("Claude catalog preserves the 1M suffix when it distinguishes two advertise
   assert.equal(models.at(-1).isDefault, true)
 })
 
+test("ACP session catalog prefers config options and normalizes the legacy model list", () => {
+  const modern = [{ id: "model", currentValue: "provider/new", options: [{ value: "provider/new" }] }]
+  assert.equal(modelConfigOptionFromSessionResponse({
+    configOptions: modern,
+    models: { currentModelId: "legacy", availableModels: [{ modelId: "legacy" }] }
+  }), modern)
+
+  assert.deepEqual(modelConfigOptionFromSessionResponse({
+    models: {
+      currentModelId: "provider/two",
+      availableModels: [
+        { modelId: "provider/one", name: "One", description: "First" },
+        { modelId: "provider/two", name: "Two" }
+      ]
+    }
+  }), [{
+    id: "model",
+    currentValue: "provider/two",
+    options: [
+      { value: "provider/one", name: "One", description: "First" },
+      { value: "provider/two", name: "Two" }
+    ]
+  }])
+})
+
+test("ACP model normalization filters retired prefixes at a path boundary and preserves inline wire values", () => {
+  const option = {
+    id: "model",
+    currentValue: "openai/gpt/low",
+    options: [
+      { value: "mimo/mimo-auto", name: "Retired" },
+      { value: "mimo/mimo-auto/high", name: "Retired high" },
+      { value: "mimo/mimo-auto-v2", name: "Still selectable" },
+      { value: "openai/gpt", name: "GPT" },
+      { value: "openai/gpt/none", name: "GPT none" },
+      { value: "openai/gpt/low", name: "GPT low" },
+      { value: "openai/gpt/medium", name: "GPT medium" },
+      { value: "openai/gpt/high", name: "GPT high" },
+      { value: "openai/gpt/xhigh", name: "GPT xhigh" }
+    ]
+  }
+  assert.equal(modelValueIsExcluded("mimo/mimo-auto/high", ["mimo/mimo-auto"]), true)
+  assert.equal(modelValueIsExcluded("mimo/mimo-auto-v2", ["mimo/mimo-auto"]), false)
+  const variants = ["none", "low", "medium", "high", "xhigh"]
+  assert.deepEqual(splitInlineAcpModelVariant("openai/gpt/low", option, variants), {
+    modelValue: "openai/gpt",
+    variant: "low",
+    variantValue: "openai/gpt/low"
+  })
+  assert.deepEqual(normalizedAcpModelCandidates(option, ["mimo/mimo-auto"], variants, ["mimo", "openai"])
+    .map(({ value, variant, variantValue }) => [value, variant, variantValue]), [
+    ["mimo/mimo-auto-v2", undefined, undefined],
+    ["openai/gpt", undefined, undefined],
+    ...variants.map((variant) => ["openai/gpt", variant, `openai/gpt/${variant}`])
+  ])
+  const models = modelsFromConfigOptions([option], "fallback", ["mimo/mimo-auto"], {
+    inlineVariantValues: variants,
+    providerOrder: ["mimo", "openai"]
+  })
+  const inline = models.find((model) => model.variant === "low")
+  assert.equal(inline.variantValue, "openai/gpt/low")
+  assert.deepEqual(models.filter((model) => model.isDefault).map((model) => model.variant), ["low"])
+  const baseDefault = modelsFromConfigOptions([{ ...option, currentValue: "openai/gpt" }], "fallback", [], { inlineVariantValues: variants })
+  assert.equal(baseDefault.filter((model) => model.isDefault).length, 1)
+  assert.equal(baseDefault.find((model) => model.isDefault)?.variant, undefined)
+  assert.equal(modelValueForSelection(inline, option, "fallback"), "openai/gpt/low")
+  assert.equal(modelValueForSelection(models.find((model) => !model.variant && model.modelID === "gpt"), option, "fallback"), "openai/gpt")
+  assert.equal(CachedCatalog.name, "CachedCatalog")
+})
+
+test("DeepSeek Harness model values split at `::` while keeping the native value selectable", () => {
+  const option = {
+    id: "model",
+    currentValue: "deepseek-official::deepseek-flash",
+    options: [
+      { value: "deepseek-official::deepseek-flash", name: "DeepSeek-V4.1-Flash (DeepSeek)" },
+      { value: "deepseek-official::deepseek-v4-pro", name: "DeepSeek-V4-Pro (DeepSeek)" }
+    ]
+  }
+  const models = modelsFromConfigOptions([option], "deepseek")
+  assert.deepEqual(models.map(({ providerID, modelID, modelName, isDefault }) => ({ providerID, modelID, modelName, isDefault })), [
+    { providerID: "deepseek-official", modelID: "deepseek-flash", modelName: "DeepSeek-V4.1-Flash (DeepSeek)", isDefault: true },
+    { providerID: "deepseek-official", modelID: "deepseek-v4-pro", modelName: "DeepSeek-V4-Pro (DeepSeek)", isDefault: false }
+  ])
+  assert.equal(modelValueForSelection(models[0], option, "deepseek"), "deepseek-official::deepseek-flash")
+  assert.equal(modelValueForSelection(models[1], option, "deepseek"), "deepseek-official::deepseek-v4-pro")
+  assert.deepEqual(normalizedAcpModelCandidates(option).map(({ value, currentValue }) => [value, currentValue]), [
+    ["deepseek-official::deepseek-flash", true],
+    ["deepseek-official::deepseek-v4-pro", false]
+  ])
+  const labeled = modelsFromConfigOptions([option], "deepseek", [], {
+    providerLabels: { "deepseek-official": "DeepSeek" }
+  })
+  assert.deepEqual(labeled.map(({ providerID, providerName }) => ({ providerID, providerName })), [
+    { providerID: "deepseek-official", providerName: "DeepSeek" },
+    { providerID: "deepseek-official", providerName: "DeepSeek" }
+  ])
+})
+
+test("provider ordering understands both `/` and `::` model separators", () => {
+  const option = {
+    id: "model",
+    currentValue: "local::one",
+    options: [
+      { value: "local::one" },
+      { value: "remote/two" }
+    ]
+  }
+  assert.deepEqual(
+    normalizedAcpModelCandidates(option, [], [], ["remote", "local"]).map(({ value, sortPriority }) => [value, sortPriority]),
+    [["remote/two", 0], ["local::one", 1]]
+  )
+})
+
 test("ACP model discovery keeps one warm catalog per adapter lifetime and explicit refresh uses a fresh technical session", async () => {
   const stateDirectory = await mkdtemp(path.join(tmpdir(), "harness-model-catalog-"))
   try {
@@ -109,6 +229,46 @@ test("concurrent ACP model picker opens join one technical catalog operation", a
     assert.equal(agent.loadCalls, 0)
     assert.equal(results.every((result) => result.models.length === 2), true)
     assert.equal(catalog.diagnostics().inFlight, false)
+  } finally {
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("ACP catalog accepts legacy session models and keeps the snapshot when technical session cleanup fails", async () => {
+  const stateDirectory = await mkdtemp(path.join(tmpdir(), "harness-model-legacy-cleanup-"))
+  try {
+    const agent = new FakeAcp("legacy")
+    agent.request = async (method, params) => {
+      if (method !== "session/new") throw new Error(`unexpected method ${method}`)
+      assert.equal(params.cwd, "/repo")
+      return {
+        sessionId: "legacy-session",
+        models: {
+          currentModelId: "provider/current",
+          availableModels: [
+            { modelId: "provider/current", name: "Current" },
+            { modelId: "provider/other", name: "Other" }
+          ]
+        }
+      }
+    }
+    let catalog
+    catalog = new AcpAgentModelCatalog({
+      agent,
+      agentID: "pi",
+      directory: "/repo",
+      stateDirectory,
+      cleanupSession: async ({ sessionID, directory }) => {
+        assert.equal(sessionID, "legacy-session")
+        assert.equal(directory, "/repo")
+        assert.deepEqual(catalog.cache.map((model) => model.modelID), ["current", "other"])
+        throw new Error("adapter cannot delete session")
+      }
+    })
+    const result = await catalog.list({ allowStale: false })
+    assert.deepEqual(result.models.map((model) => model.modelID), ["current", "other"])
+    assert.equal(catalog.diagnostics().cleanupError, "adapter cannot delete session")
+    assert.equal(catalog.diagnostics().technicalSessionPersisted, true)
   } finally {
     await rm(stateDirectory, { recursive: true, force: true })
   }
@@ -158,7 +318,7 @@ test("ACP variants are emitted only from model-specific config options advertise
     )
     assert.equal(result.models.filter((model) => model.variant).every((model) => model.variantConfigId === "thinking"), true)
     assert.equal(result.models.some((model) => model.variantConfigId === "invented-option"), false)
-    assert.equal(currentModel, "provider/two", "the hidden technical Session may remain on the last probed model")
+    assert.equal(currentModel, "provider/one", "the hidden technical Session must be restored so it cannot change the default of user Sessions")
     const selected = await catalog.resolve({ providerID: "provider", modelID: "two", variant: "high" })
     assert.equal(selected.variantConfigId, "thinking")
   } finally {

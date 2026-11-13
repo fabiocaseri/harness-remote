@@ -1,10 +1,12 @@
+import { realpath } from "node:fs/promises"
+import path from "node:path"
 import { createAgentRoutingServer } from "./agent-router.js"
 import { createAgentModelServer } from "./agent-model-server.js"
 import { createCrossMachineHandoffServer } from "./cross-machine-handoff-server.js"
 import { createCrossMachineTargetRuntime } from "./cross-machine-target-runtime.js"
 import { MachineRegistry, trackAgentHostLifecycle } from "./machine-registry.js"
 import { trackManagedHostLifecycle } from "./opencode-host.js"
-import { discoverProjects } from "./project-catalog.js"
+import { discoverProjects, insideRoot } from "./project-catalog.js"
 import { createBridgeServer } from "./server.js"
 import { createSessionClaimServer } from "./session-claim-server.js"
 import { SessionLinkStore } from "./session-link-store.js"
@@ -177,11 +179,13 @@ export class MachineDaemon {
   }
 
   close() {
+    const closing = []
     for (const entry of this.hosts.values()) {
-      entry.modelCatalog?.close?.()
-      if (entry.kind === "acp") entry.host.close?.()
-      else entry.host.stop?.("SIGTERM")
+      closing.push(entry.modelCatalog?.close?.())
+      if (entry.kind === "acp") closing.push(entry.host.close?.())
+      else closing.push(entry.host.stop?.("SIGTERM"))
     }
+    return Promise.allSettled(closing)
   }
 }
 
@@ -290,8 +294,10 @@ export function createMachineDaemonServer({
       // place that already loads configOptions, orders the model before its variant, and defers both
       // to dequeue when a turn is still running. Setting them here directly reordered the model
       // after the variant and mutated a live turn's configuration.
-      await service.prompt(sessionID, text, modelWireName(resolvedModel), acpPromptAttachments(attachments), acpModelVariant(resolvedModel))
-      return
+      // The disposition (started, queued or steered) travels back in the mutation result, so the app
+      // shows a queued prompt as waiting from the daemon's word rather than guessing from timing.
+      const outcome = await service.prompt(sessionID, text, modelWireName(resolvedModel), acpPromptAttachments(attachments), acpModelVariant(resolvedModel))
+      return outcome?.disposition ? { disposition: outcome.disposition, messageID: outcome.messageID } : undefined
     }
 
     const host = entry.host
@@ -345,8 +351,8 @@ export function createMachineDaemonServer({
     if (entry.kind === "acp") {
       const service = acpService(agentID)
       if (!service) throw daemonError("session_unavailable", `Agent ${agentID} cannot load native Sessions`)
-      await service.prompt(sessionID, text, modelWireName(resolvedModel), [], acpModelVariant(resolvedModel))
-      return
+      const outcome = await service.prompt(sessionID, text, modelWireName(resolvedModel), [], acpModelVariant(resolvedModel))
+      return outcome?.disposition ? { disposition: outcome.disposition, messageID: outcome.messageID } : undefined
     }
 
     const host = entry.host
@@ -470,7 +476,10 @@ export function createMachineDaemonServer({
     return sessions
       .map((session) => ({
         id: session?.id || session?.sessionId,
-        directory: session?.directory || session?.cwd || directory
+        // A directory supplied in the query is only a filter, not evidence of where the
+        // harness says this Session lives. Handoff uses the reported directory as authority
+        // when allowing a Project outside --root.
+        directory: session?.directory || session?.cwd
       }))
       .filter((session) => session.id && (!directory || session.directory === directory))
   }
@@ -511,6 +520,29 @@ export function createMachineDaemonServer({
     return handoffResultForTarget(sourceAgentID, sourceSessionID, input.targetAgentID, input.directory, candidates[0].id)
   }
 
+  /**
+   * The `--root` boundary keeps the daemon from creating a Session in a caller-invented directory.
+   * A handoff does not invent one: it continues an existing Session in the Project that Session
+   * already lives in. When the source harness itself lists the source Session in that directory, the
+   * directory is as trustworthy as the Session, so a Session outside the configured roots can still
+   * be continued on another harness. Without this, the rail offers a Session that can be prompted
+   * but fails the moment the user continues it - with an error about a boundary they never set.
+   */
+  const assertHandoffDirectory = async (sourceAgentID, sourceSessionID, directory) => {
+    const resolved = await realpath(directory).catch(() => undefined)
+    if (resolved) {
+      for (const root of [...roots, path.join(stateDirectory, "worktrees")]) {
+        const resolvedRoot = await realpath(root).catch(() => undefined)
+        if (resolvedRoot && insideRoot(resolvedRoot, resolved)) return
+      }
+      // Only the source harness can prove the caller's directory belongs to this Session. A failed
+      // listing proves nothing, so it keeps the boundary error below.
+      const sourceSessions = await listHandoffSessions(sourceAgentID, directory).catch(() => [])
+      if (sourceSessions.some((session) => session.id === sourceSessionID)) return
+    }
+    throw daemonError("invalid_request", "Native Session handoff directory is outside the configured --root boundary")
+  }
+
   const handoffSession = async (
     sourceAgentID,
     sourceSessionID,
@@ -519,6 +551,10 @@ export function createMachineDaemonServer({
   ) => {
     const sourceEntry = daemon.hostEntry(sourceAgentID)
     if (!sourceEntry) throw daemonError("unknown_agent", `Unknown source agent: ${sourceAgentID}`)
+    // Handoff creates a new agent Session with this cwd, so it gets the same --root boundary as
+    // POST /session, plus this daemon's managed Task worktrees and the source Session's own
+    // Project. The caller's string stays the Session identity; only its resolved form is checked.
+    await assertHandoffDirectory(sourceAgentID, sourceSessionID, directory)
     const targetEntry = daemon.hostEntry(targetAgentID)
     if (!targetEntry) throw daemonError("unknown_agent", `Unknown target agent: ${targetAgentID}`)
     if (targetEntry.host?.capabilities?.sessions === false || daemon.registry.host(targetAgentID)?.capabilities?.sessions === false) {
