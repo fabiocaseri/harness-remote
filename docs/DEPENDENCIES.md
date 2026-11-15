@@ -170,14 +170,17 @@ an Activity section in a finished conversation reads `Working` for good, snapsho
 shapes, and whether session visibility or image capability changes. The app intentionally does not
 expose agent selection, server slash commands or VCS/diff for this backend.
 
-### Codex CLI — ACP over stdio, via the official adapter
+### Codex — ACP over stdio, via the official adapter
 
 - **Adapter:** [`@agentclientprotocol/codex-acp`](https://www.npmjs.com/package/@agentclientprotocol/codex-acp),
-  published by the Agent Client Protocol project, MIT. **Pinned to `1.1.14`** in
+  published by the Agent Client Protocol project, MIT. **Pinned to `1.13.1`** in
   `bridge/src/harness-profiles.js`.
 - **The adapter embeds `@openai/codex`**, so no separate Codex installation is needed on the host —
-  but credentials still come from `codex login` (ChatGPT account) or an `OPENAI_API_KEY` in the
-  bridge process environment.
+  but its optional native binary dependency must be present. Discovery first honors `CODEX_PATH`,
+  then a working `codex` on PATH, then known Codex/ChatGPT desktop bundle paths on Linux/macOS.
+  The discovered binary is passed to the adapter as `CODEX_PATH`. Credentials come from the native
+  cached account or configured provider credentials; signing in to ChatGPT alone does not prove
+  that the Codex runtime has a usable account.
 - **Pinned for the same reason as PI and Claude:** an unpinned `npx -y` default fails live with
   `notarget` when a release outruns its own tarball in the registry.
 
@@ -187,14 +190,14 @@ read from a spec:**
 | Assumption | What breaks if it changes |
 |---|---|
 | `session/list` enumerates every Codex thread on the machine | the session list empties |
-| Rollouts stay at `~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<timestamp>-<sessionId>.jsonl` | `createCodexHistoryLoader` finds nothing and every session Codex holds open shows as empty |
+| Rollouts stay at `${CODEX_HOME:-~/.codex}/sessions/<yyyy>/<mm>/<dd>/rollout-<timestamp>-<sessionId>.jsonl` | `createCodexHistoryLoader` finds nothing and every session Codex holds open shows as empty |
 | A rollout records the turns the user saw as `event_msg` records. Current rollouts use `item_completed` with `UserMessage.content[type=text]`, `AgentMessage.content[type=Text]`, and `Reasoning.summary_text`; legacy rollouts use `user_message.message`, `agent_message.message`, and `agent_reasoning.text` | the transcript of an externally-held session goes empty, or starts showing the instruction blocks Codex feeds the model, which `response_item` carries under the `user` role |
 | Model config option ids are bare (`gpt-5.2`), not `provider/model` | covered by the same bare-id handling the Claude Code backend proved; if ids gain a provider prefix they still parse, under that provider name |
 | `reasoning_effort` and `mode` config options are advertised but not exposed | they stay invisible in the app; no crash, just unused surface |
 | `plan` / `plan_update` notifications carry entries addressed as `{content, status, priority}` | todo updates stop rendering |
 | `available_commands_update` exposes slash commands | the app's custom `/commands` picker goes empty |
 | ACP permissions requests are auto-answered with `allow` (`permissionMode: "allow"`) | if the adapter asks and no answer were sent, tool calls would hang; granting is the deliberate policy |
-| `api-key` is advertised before `chat-gpt`. The profile prefers `chat-gpt` so a `codex login` is honoured | the bridge would pick `api-key`, demand `CODEX_API_KEY`/`OPENAI_API_KEY`, and fail at inference; an env-var API key deliberately still works if set |
+| Adapter 1.13.1 checks the cached account on operations; explicitly calling `authenticate` at discovery can refresh tokens and open browser login | Codex disables that startup RPC to reuse the native account. Missing authentication must still fail visibly on operations; `chat-gpt` remains the declared method |
 
 **One writer per thread.** Codex takes a writer lock for as long as a client keeps a thread open —
 `~/.codex/thread-writer-locks/<sessionId>.lock` — and `session/load` answers
@@ -211,6 +214,48 @@ holding the thread.
 
 **Watch:** the embedded `@openai/codex` version (it decides which models and modes exist), the
 rollout record shape, and any new `sessionUpdate` / notification shape.
+
+### DeepSeek Harness (DSH) — ACP over stdio, via a third-party adapter
+
+- **Adapter:** [`@openma/deepseek-harness-acp`](https://www.npmjs.com/package/@openma/deepseek-harness-acp),
+  MIT, **pinned to `0.4.40`** in `bridge/src/harness-profiles.js`. The package publishes `dsh-acp`
+  and embeds a standalone DeepSeek Harness runtime (`@deepseek-ai/dsh`), so no separate `dsh`
+  install is required. An installed `dsh-acp` on PATH is preferred; otherwise `npx` fetches the
+  pinned package.
+- **Runtime:** Node.js 22.15 or newer. The first start extracts the bundled runtime into the
+  adapter cache (roughly 1 GB, `DSH_ACP_CACHE_DIR` overrides the location) and can take about 40
+  seconds. Later starts reuse it.
+- **Authentication:** the host must already have DSH credentials in `~/.dsh/.credentials.yaml`
+  (written by `dsh login` / `dsh-acp login`) or `DEEPSEEK_API_KEY` in the adapter environment. The
+  bridge does not manage the DeepSeek API key and sets `NO_BROWSER=1` so an unauthenticated start
+  cannot open a browser.
+- **Sessions:** DSH stores JSONL sessions under `$DSH_HOME/sessions` (default `~/.dsh/sessions`),
+  grouped by workspace. `session/list` reports every workspace; the bridge filters by Project as it
+  does for the other ACP harnesses.
+
+**Assumed, from a live 0.4.40 probe with DSH 0.2.1-rc.2:**
+
+| Assumption | What breaks if it changes |
+|---|---|
+| `session/new`, `session/list`, `session/load`, `session/prompt`, `session/cancel`, `session/close` and `session/set_config_option` expose the standard surface | Session browsing, replay, prompting or Stop stops working |
+| `session/load` replays the complete transcript, including the `user_message_chunk` for each prompt and runtime-context notices as non-message `session_info_update`s | the profile declares `replayAuthoritative` and `replayUserChunksAreMessages`; a partial replay would replace the cached transcript with less |
+| Model config values use `provider::model`, e.g. `deepseek-official::deepseek-flash` | the model picker groups on `::` as well as `/`; if the adapter changes separator the picker loses its provider split |
+| Reasoning is a separate `effort` select (`off`, `low`, `high`, `max`) | the reasoning control disappears; the model still works |
+| `session/resume` exists but is not used, because without a journal loader it would skip the only transcript source | do not enable `journalPageWhileOwned: false` for this profile without adding a history loader |
+| `_session/steering` injects into a running turn and answers `{outcome:"promptRequired",reason:"noRunningTurn"}` when the turn already ended | the profile declares `midTurnPrompt: "steer"`; the bridge queues or starts the already-recorded prompt on that outcome |
+| Tool permissions accept the bridge's automatic `allow` response | tool calls can hang or be refused; the bridge deliberately runs DSH unattended |
+
+**Watch:** the pinned adapter version, the bundled DSH version, the model value separator, the
+`effort` option id, and the steering response shape.
+
+### OpenCode 2 — native default effort
+
+Observed with OpenCode 2.0.11: both ACP session config and native session export may report
+`default` as the selected effort even when it is absent from selectable model variants. Restoring
+that value as an explicit variant makes the next prompt fail catalog validation after reopening.
+The OpenCode 2 profile declares `modelVariantDefaultValues: ["default"]`; `AcpService` normalizes
+it to the base model in both read paths. Actual variants such as `high` remain explicit, and unknown
+variants are still rejected. Recheck config and export restoration together when this contract changes.
 
 ## App and packaging
 
