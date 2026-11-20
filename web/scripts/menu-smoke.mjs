@@ -10,7 +10,9 @@
  * Runs anywhere Electron can reach a display. CI runs it on macOS, which is the platform that
  * actually installs this menu.
  *
- * Exit code 0 means the menu built and installed with the structure we asked for.
+ * It prints a pass line when the menu built and installed with the structure we asked for.
+ * scripts/run-menu-smoke.mjs reads that line, because Electron's own exit code is unreliable on
+ * Windows.
  */
 import { app, Menu } from "electron"
 import { buildApplicationMenu } from "../dist-electron/electron/app-menu.js"
@@ -117,9 +119,12 @@ app.whenReady().then(() => {
 function finish() {
   if (failures.length === 0) {
     console.log(`application menu smoke test passed on ${process.platform}`)
-    app.exit(0)
+    // On Windows, Electron can return 1 from app.exit(0) after the menu has
+    // passed every assertion. This short-lived smoke process has no window or
+    // background work to tear down, so exit with the assertion result directly.
+    process.exit(0)
     return
   }
   for (const failure of failures) console.error(`  ✗ ${failure}`)
-  app.exit(1)
+  process.exit(1)
 }

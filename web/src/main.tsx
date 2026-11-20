@@ -3,6 +3,8 @@ import ReactDOM from "react-dom/client"
 import { Capacitor } from "@capacitor/core"
 import type { DesktopLocalRuntimeState } from "../electron/ipc-contract"
 import { installAppPreferences } from "./appPreferences"
+import { syncBackgroundAttention } from "./background-attention"
+import { useNotificationPreferences } from "./notification-preferences"
 import { installCompletionAudioGuard } from "./completion-audio"
 import { StandaloneUniversalWorkspace } from "./components/standalone-universal-workspace"
 import {
@@ -14,6 +16,7 @@ import {
 import { ErrorBoundary } from "./ErrorBoundary"
 import {
   claimMachinePairing,
+  PairingUnreachableError,
   scanAndroidMachinePairing,
   subscribeAndroidMachinePairing,
   upsertPairedMachine,
@@ -30,24 +33,29 @@ import {
 } from "./workspaceMachines"
 import "./styles.css"
 import "./taskdesk-theme.css"
-import "./universal-workspace-readable-fixes.css"
-import "./taskdesk-v3-unified.css"
 import "./conversation-control-plane-overrides.css"
-import "./conversation-control-plane-mobile-polish.css"
-import "./v3-mobile-regression-fixes.css"
-import "./v3-mobile-landscape-grid-fix.css"
-import "./v3-mobile-workspace-switcher-polish.css"
-import "./v3-mobile-a11y-fix.css"
-import "./v3-mobile-product-parity.css"
+import "./v3-mobile.css"
 import "./session-first-navigation.css"
 import "./session-first-workbench.css"
 import "./conversation-base.css"
-import "./session-first-centering-fix.css"
 import "./session-handoff-routing.css"
 import "./machine-pairing.css"
+import "./machine-card-layout.css"
 // Loaded last: the ported controls refine rules the sheets above already set, and settling those
 // ties by load order is what keeps the port free of `!important`.
 import "./beautiful-ui-controls.css"
+// A turn's Activity section. It styles only its own `hr-act*` classes, so its place here is about
+// reading order rather than winning ties.
+import "./activity-timeline.css"
+// The narrow Session header refines phone rules from several sheets above, so it settles last.
+import "./session-header-narrow.css"
+// Phone conversation chrome: one-row header, controls in a bottom sheet.
+import "./mobile-compact-chat.css"
+// Final polish for the compact Session list. Self-contained: remove this import to revert it.
+import "./compact-final-touch.css"
+import "./mobile-composer.css"
+// Plugin catalogue, allowance cards and quick view. Self-contained `hr-plugin-*` classes.
+import "./plugin-center.css"
 
 installAppPreferences()
 installCompletionAudioGuard()
@@ -56,6 +64,8 @@ type PairingNotice = {
   kind: "working" | "success" | "error"
   text: string
 }
+
+const PAIRING_SUCCESS_NOTICE_MS = 4_000
 
 function localRuntimeMachine(state: DesktopLocalRuntimeState | null): WorkspaceMachine | null {
   if (state?.status !== "ready") return null
@@ -85,6 +95,11 @@ function HarnessRemoteBoundary() {
   }, [localRuntime, persistedMachines])
   const machinesRef = useRef(machines)
   machinesRef.current = machines
+  // The desktop-local runtime is resolved asynchronously after the first paint. Until it settles, an
+  // empty machine list only means "not known yet", so the shell must not offer to add a machine or
+  // auto-open the manager over the Session list. Persisted machines load synchronously and need no
+  // wait; only the desktop runtime does.
+  const machinesReady = !isDesktopPlatform() || (localRuntime !== null && localRuntime.status !== "starting")
   const pairingInFlightRef = useRef(new Set<string>())
   const pairedGrantRef = useRef(new Set<string>())
   const [desktopReady, setDesktopReady] = useState(() => !isDesktopPlatform())
@@ -93,6 +108,27 @@ function HarnessRemoteBoundary() {
   const [pairingScanBusy, setPairingScanBusy] = useState(false)
   const [pairingSuccessRevision, setPairingSuccessRevision] = useState(0)
   const [pairingSuccessMachineName, setPairingSuccessMachineName] = useState<string | null>(null)
+
+  // The native foreground service is the only component that keeps paired-machine streams alive
+  // after Android backgrounds the WebView. A launch with paired machines asks for the notification
+  // permission when this install has never asked: someone who updated from a version without
+  // background notifications already has machines and would otherwise never see the prompt. The
+  // native side asks at most once per install and never again after a grant or a denial.
+  const notificationPreferences = useNotificationPreferences()
+  useEffect(() => {
+    if (!machinesReady) return
+    void syncBackgroundAttention(persistedMachines, { prompt: true, preferences: notificationPreferences }).catch(() => undefined)
+  }, [machinesReady, revision, notificationPreferences])
+
+  // Success needs no action, so it clears itself. Errors carry what to fix and stay until dismissed;
+  // "connecting" is replaced by the outcome.
+  useEffect(() => {
+    if (pairingNotice?.kind !== "success") return
+    const timer = window.setTimeout(() => {
+      setPairingNotice((current) => current === pairingNotice ? null : current)
+    }, PAIRING_SUCCESS_NOTICE_MS)
+    return () => window.clearTimeout(timer)
+  }, [pairingNotice])
 
   // Persistent remote-machine profiles are still acknowledged before the workspace starts issuing
   // requests. The desktop-owned local runtime is intentionally absent from this snapshot: its
@@ -178,6 +214,7 @@ function HarnessRemoteBoundary() {
       const nextMachines = upsertPairedMachine(machinesRef.current, paired)
       machinesRef.current = nextMachines
       persistMachines(nextMachines)
+      void syncBackgroundAttention(nextMachines, { prompt: true }).catch(() => undefined)
       setPairingSuccessMachineName(paired.name)
       setPairingSuccessRevision((value) => value + 1)
       setPairingNotice({ kind: "success", text: t("sf.pairingConnected", { name: paired.name }) })
@@ -186,7 +223,9 @@ function HarnessRemoteBoundary() {
       // another chance until the server itself reports used/expired.
       setPairingNotice({
         kind: "error",
-        text: error instanceof Error ? error.message : t("sf.pairingFailed")
+        text: error instanceof PairingUnreachableError
+          ? t("sf.pairingUnreachable", { endpoint: error.endpoint })
+          : error instanceof Error ? error.message : t("sf.pairingFailed")
       })
     } finally {
       pairingInFlightRef.current.delete(grantKey)
@@ -228,6 +267,7 @@ function HarnessRemoteBoundary() {
     <>
       <StandaloneUniversalWorkspace
         machines={machines}
+        machinesReady={machinesReady}
         onPersistMachines={persistMachines}
         onScanMachinePairing={Capacitor.getPlatform() === "android" ? scanPairingQR : undefined}
         machinePairingBusy={pairingScanBusy}
@@ -247,7 +287,7 @@ function HarnessRemoteBoundary() {
           aria-live="polite"
         >
           <span><strong>{t("sf.machinePairing")}</strong>{pairingNotice.text}</span>
-          <button type="button" onClick={() => setPairingNotice(null)} aria-label={t("sf.dismissPairingStatus")}>×</button>
+          <button type="button" className="hr-machine-pairing-dismiss" onClick={() => setPairingNotice(null)} aria-label={t("sf.dismissPairingStatus")}>×</button>
         </div>
       ) : null}
     </>

@@ -1,5 +1,5 @@
 import http from "node:http"
-import { authenticateDaemonRequest, writeJSON } from "./http-policy.js"
+import { authenticateDaemonRequest, guardRequestHandler, writeJSON } from "./http-policy.js"
 
 const COLLECTION = "/v1/work-threads"
 const DETAIL_ROUTE = /^\/v1\/work-threads\/([^/]+)$/
@@ -8,6 +8,7 @@ const CHECKPOINTS_ROUTE = /^\/v1\/work-threads\/([^/]+)\/checkpoints$/
 const RESTORE_ROUTE = /^\/v1\/work-threads\/([^/]+)\/checkpoints\/([^/]+)\/restore$/
 
 async function readJSONBody(request) {
+  request.setEncoding("utf8")
   let body = ""
   for await (const chunk of request) {
     body += chunk
@@ -26,7 +27,7 @@ function statusFor(error) {
 }
 
 export function createWorkThreadServer({ innerServer, config, controller, createServer = http.createServer }) {
-  return createServer(async (request, response) => {
+  return createServer(guardRequestHandler(async (request, response) => {
     const requestURL = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`)
     const detail = DETAIL_ROUTE.exec(requestURL.pathname)
     const cancel = CANCEL_ROUTE.exec(requestURL.pathname)
@@ -94,7 +95,7 @@ export function createWorkThreadServer({ innerServer, config, controller, create
       response.writeHead(405, { Allow: allow })
       response.end()
     } catch (error) {
-      writeJSON(response, statusFor(error), { error: error instanceof Error ? error.message : String(error) })
+      writeJSON(response, statusFor(error), { error: error instanceof Error ? error.message : String(error), ...(error?.code ? { code: error.code } : {}) })
     }
-  })
+  }))
 }
