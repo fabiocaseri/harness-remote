@@ -9,6 +9,30 @@ export type MachinePairingActivation = {
   expiresAt: number
 }
 
+/** One scan-ready candidate address of the granting daemon. */
+export type MachinePairingGrantLink = {
+  endpoint: string
+  uri: string
+}
+
+/**
+ * The daemon's answer to an authenticated grant request: the one-time URIs a QR can be rendered
+ * from, when they stop working, and whether this daemon can be reached from another device at all.
+ * It never contains credentials; those still only travel through the claim response.
+ */
+export type MachinePairingGrant = {
+  expiresAt: number
+  loopbackOnly: boolean
+  links: MachinePairingGrantLink[]
+}
+
+/** Whether the outstanding grant is still pending, has been claimed, or has expired unclaimed. */
+export type MachinePairingGrantStatus = {
+  expiresAt: number
+  claimed: boolean
+  expired: boolean
+}
+
 type PairingClaimResponse = {
   version: 1
   machine: { id: string; name: string }
@@ -47,12 +71,22 @@ function normalizedPairingEndpoint(value: string): string | null {
   return `${endpoint.protocol}//${endpoint.hostname}:${port}`
 }
 
+/** `harnessremote:` is a non-special scheme. Android System WebView before M130 parsed those as
+ * opaque paths, so `harnessremote://pair` reports hostname "" and pathname "//pair" instead of the
+ * host the URL Standard assigns it. Reading the authority back out of the path keeps pairing
+ * working on those devices, where the host check is the only part that differs. */
+function pairingAuthority(parsed: URL): string {
+  if (parsed.hostname) return parsed.hostname
+  const legacy = /^\/\/([^/?#]+)/.exec(parsed.pathname)
+  return legacy?.[1] ?? ""
+}
+
 /** Accept only the private URI emitted by the HR3 machine daemon startup pairing grant. Expiry is
  * checked during claim so opening an old QR produces an explicit user-visible error rather than a no-op. */
 export function parseMachinePairingActivation(url: string): MachinePairingActivation | null {
   let parsed: URL
   try { parsed = new URL(url) } catch { return null }
-  if (parsed.protocol !== "harnessremote:" || parsed.hostname !== "pair") return null
+  if (parsed.protocol !== "harnessremote:" || pairingAuthority(parsed) !== "pair") return null
 
   const endpointRaw = parsed.searchParams.get("endpoint")
   const token = cleanText(parsed.searchParams.get("token"), MAX_TOKEN_LENGTH)
@@ -133,6 +167,18 @@ function workspaceMachine(endpoint: string, payload: PairingClaimResponse): Work
 
 type NativePairingRequest = typeof CapacitorHttp.request
 
+/** The phone never reached the computer: the request failed below HTTP. This, not the computer, is
+ *  the only side that can observe a firewall, a different network or Wi-Fi client isolation. */
+export class PairingUnreachableError extends Error {
+  readonly endpoint: string
+  constructor(endpoint: string, cause?: unknown) {
+    super(`Could not reach ${endpoint}.`)
+    this.name = "PairingUnreachableError"
+    this.endpoint = endpoint
+    if (cause !== undefined) (this as { cause?: unknown }).cause = cause
+  }
+}
+
 export async function claimMachinePairing(
   activation: MachinePairingActivation,
   options: { nativeRequest?: NativePairingRequest; fetchImpl?: typeof fetch; native?: boolean } = {}
@@ -154,7 +200,7 @@ export async function claimMachinePairing(
         readTimeout: 10_000
       })
     } catch (error) {
-      throw new Error(error instanceof Error ? error.message : "Could not reach the machine pairing endpoint.")
+      throw new PairingUnreachableError(activation.endpoint, error)
     }
     if (response.status < 200 || response.status >= 300) {
       throw new Error(errorDetail(response.data, `Pairing failed with HTTP ${response.status}.`))
@@ -173,7 +219,7 @@ export async function claimMachinePairing(
       body: JSON.stringify({ token: activation.token })
     })
   } catch (error) {
-    throw new Error(error instanceof Error ? error.message : "Could not reach the machine pairing endpoint.")
+    throw new PairingUnreachableError(activation.endpoint, error)
   }
   let body: unknown = null
   try { body = await response.json() } catch { /* handled below */ }
@@ -181,6 +227,36 @@ export async function claimMachinePairing(
   const payload = claimPayload(body)
   if (!payload) throw new Error("The machine returned an invalid pairing response.")
   return workspaceMachine(activation.endpoint, payload)
+}
+
+function machinePairingGrantLink(value: unknown): MachinePairingGrantLink | null {
+  const link = bodyObject(value)
+  const endpoint = typeof link?.endpoint === "string" ? normalizedPairingEndpoint(link.endpoint) : null
+  const uri = cleanText(link?.uri, 4_096)
+  if (!endpoint || !uri) return null
+  // The URI is the authority; the endpoint exists so the picker can label it. A link whose parts
+  // disagree would render a QR for a different address than the one the user selected.
+  const activation = parseMachinePairingActivation(uri)
+  if (!activation || activation.endpoint !== endpoint) return null
+  return { endpoint, uri }
+}
+
+export function parseMachinePairingGrant(value: unknown): MachinePairingGrant | null {
+  const body = bodyObject(value)
+  if (body?.version !== 1 || typeof body.loopbackOnly !== "boolean" || !Array.isArray(body.links)) return null
+  const expiresAt = Number(body.expiresAt)
+  if (!Number.isFinite(expiresAt) || expiresAt <= 0) return null
+  const links = body.links.map(machinePairingGrantLink)
+  if (links.some((link) => link === null)) return null
+  return { expiresAt, loopbackOnly: body.loopbackOnly, links: links as MachinePairingGrantLink[] }
+}
+
+export function parseMachinePairingGrantStatus(value: unknown): MachinePairingGrantStatus | null {
+  const body = bodyObject(value)
+  if (body?.version !== 1 || typeof body.claimed !== "boolean" || typeof body.expired !== "boolean") return null
+  const expiresAt = Number(body.expiresAt)
+  if (!Number.isFinite(expiresAt) || expiresAt <= 0) return null
+  return { expiresAt, claimed: body.claimed, expired: body.expired }
 }
 
 function endpointIdentity(machine: WorkspaceMachine): string {

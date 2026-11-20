@@ -400,6 +400,8 @@ function stopServer(server) {
 
 async function seed(page) {
   await page.addInitScript(({ key, port, machineID }) => {
+    // These smokes open Session rows directly; Classic keeps Projects expanded.
+    localStorage.setItem("harness-remote.skin", "classic")
     localStorage.setItem(key, JSON.stringify([{
       id: machineID,
       name: "OpenCode regression machine",
@@ -483,15 +485,15 @@ async function assertCompletionAndModel(page, text, reasoning, final, label) {
   // session.status idle happens before this answer is durable and no final message.updated follows.
   // The Session remains mounted throughout: the answer and Ready state must appear without navigation.
   await page.getByText(final, { exact: true }).waitFor({ state: "visible", timeout: 3_000 })
-  await page.locator(".tdw-conversation-state.ready").waitFor({ state: "attached", timeout: 3_000 })
+  await page.locator(".tdw-conversation-state.ready:visible").waitFor({ state: "visible", timeout: 3_000 })
   assert.equal(await page.getByText(text, { exact: true }).count(), 1, `${label}: prompt rendered more than once`)
   assert.equal(await page.getByText(final, { exact: true }).count(), 1, `${label}: final response rendered more than once`)
   assert.equal(promptBodies.length, before + 1, `${label}: one user Send must dispatch exactly one native prompt`)
 
   // Reasoning text is intentionally collapsed by the mature renderer. Verify it exists in the same
   // activity group without changing the renderer's visibility semantics.
-  const activity = page.locator(".uw-activity-group").last()
-  await activity.locator("summary").click()
+  const activity = page.locator(".hr-activity").last()
+  await activity.locator(".hr-activity-toggle").click()
   await page.getByText(reasoning, { exact: true }).waitFor({ state: "visible", timeout: 1_000 })
 }
 
@@ -509,7 +511,7 @@ async function runScenario(browser, viewport, label) {
   await page.reload({ waitUntil: "domcontentloaded" })
   await openPrimary(page)
   await page.getByText(FINAL, { exact: true }).waitFor({ state: "visible", timeout: 2_000 })
-  await page.locator(".tdw-conversation-state.ready").waitFor({ state: "attached", timeout: 2_000 })
+  await page.locator(".tdw-conversation-state.ready:visible").waitFor({ state: "visible", timeout: 2_000 })
   assert.equal(await page.getByText(PROMPT, { exact: true }).count(), 1, `${label}: reopen duplicated first prompt`)
   assert.equal(await page.getByText(FINAL, { exact: true }).count(), 1, `${label}: reopen duplicated first final`)
 

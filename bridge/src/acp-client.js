@@ -1,10 +1,16 @@
 import { spawn } from "node:child_process"
 import { EventEmitter } from "node:events"
+import { stat } from "node:fs/promises"
+import { withoutGatewayCredentials } from "./child-environment.js"
+import { closeOwnedChildProcess, ownChildProcess } from "./managed-child-process.js"
 
 // An adapter launched through `npx` downloads itself on first use, which takes far longer
 // than a warm start. Ten seconds failed on a cold PI adapter while npm was still fetching.
 const START_TIMEOUT_MS = 90_000
 const REQUEST_TIMEOUT_MS = 30_000
+// A tool can legitimately wait for external work long after the prompt's ordinary idle window.
+// Keep a bounded watchdog so an adapter that never answers can still release the turn.
+const ACTIVE_TOOL_TIMEOUT_MS = 2 * 60 * 60_000
 /** Kept so a failed handshake can report why the adapter died instead of just its exit code. */
 const STDERR_KEPT_CHARS = 600
 
@@ -26,23 +32,30 @@ export class AcpClient extends EventEmitter {
   #spawn
   #permissionMode
   #preferredAuthMethod
+  #authenticate
+  #environment
+  #cwd
   #child
   #buffer = ""
   #nextID = 1
   #pending = new Map()
   #starting
+  #closingPromise
   #agentInfo
   #promptCapabilities = {}
   #sessionCapabilities = {}
   #stderr = ""
   #stderrPartial = ""
 
-  constructor({ command = "omp", args = ["acp"], permissionMode = "deny", preferredAuthMethod, spawnProcess = spawn } = {}) {
+  constructor({ command = "omp", args = ["acp"], permissionMode = "deny", preferredAuthMethod, authenticate = true, environment = {}, cwd, spawnProcess = spawn } = {}) {
     super()
     this.#command = command
     this.#args = args
     this.#permissionMode = permissionMode
     this.#preferredAuthMethod = preferredAuthMethod
+    this.#authenticate = authenticate !== false
+    this.#environment = environment && typeof environment === "object" ? { ...environment } : {}
+    this.#cwd = typeof cwd === "string" && cwd ? cwd : undefined
     this.#spawn = spawnProcess
   }
 
@@ -83,7 +96,9 @@ export class AcpClient extends EventEmitter {
       ...(pending.configID ? { configID: pending.configID } : {}),
       ageMs: Math.max(0, now - pending.startedAt),
       idleMs: Math.max(0, now - pending.lastActivityAt),
-      timeoutMs: pending.timeoutMs
+      timeoutMs: pending.timeoutMs,
+      watchdogMs: pending.watchdogMs,
+      activeToolCalls: pending.toolCalls.size
     }))
     const listenerCounts = Object.fromEntries(
       this.eventNames().map((eventName) => [String(eventName), this.listenerCount(eventName)])
@@ -101,17 +116,33 @@ export class AcpClient extends EventEmitter {
   }
 
   async start(timeoutMs = START_TIMEOUT_MS) {
-    if (this.#child) return
+    if (this.#closingPromise) await this.#closingPromise
     if (this.#starting) return this.#starting
-    this.#starting = this.#start(timeoutMs)
+    if (this.#child) return
+    const starting = this.#start(timeoutMs)
+    this.#starting = starting
     try {
-      await this.#starting
+      await starting
     } finally {
-      this.#starting = undefined
+      if (this.#starting === starting) this.#starting = undefined
     }
   }
 
   async #start(timeoutMs) {
+    if (this.#cwd && this.#spawn === spawn) {
+      let directory
+      try {
+        directory = await stat(this.#cwd)
+      } catch (error) {
+        const detail = error?.code === "ENOENT" || error?.code === "ENOTDIR"
+          ? "does not exist"
+          : "cannot be accessed"
+        throw new Error(`Session project directory ${detail}: ${this.#cwd}. Restore the project directory before reopening this Session.`, { cause: error })
+      }
+      if (!directory.isDirectory()) {
+        throw new Error(`Session project path is not a directory: ${this.#cwd}`)
+      }
+    }
     const deadline = Date.now() + Math.max(1, timeoutMs)
     const remaining = (phase) => {
       const value = deadline - Date.now()
@@ -126,8 +157,11 @@ export class AcpClient extends EventEmitter {
       : ["/d", "/s", "/c", this.#command, ...this.#args]
     const child = this.#spawn(windowsCommand, windowsArgs, {
       stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true
+      windowsHide: true,
+      env: withoutGatewayCredentials({ ...process.env, ...this.#environment }),
+      ...(this.#cwd ? { cwd: this.#cwd } : {})
     })
+    ownChildProcess(child)
     this.#child = child
     // Each attempt reports its own stderr. Carrying the buffer across restarts made every exit
     // message repeat the previous ones, so a single "pi-acp: not found" arrived three times over.
@@ -144,8 +178,13 @@ export class AcpClient extends EventEmitter {
       this.#stderrPartial = pending.pop() ?? ""
       for (const line of pending) this.emit("stderr", line)
     })
-    child.on("error", (error) => this.#handleExit(error))
+    // Writing to an adapter that has already exited (a CLI that is not installed exits at once)
+    // fails with EPIPE on its stdin. The write callback rejects that request and the exit handler
+    // reports the adapter; without a listener the stream error would crash the whole daemon.
+    child.stdin?.on?.("error", () => {})
+    child.on("error", (error) => this.#handleExit(error, child))
     child.on("exit", (code, signal) => {
+      if (this.#child !== child) return
       if (this.#stderrPartial) {
         this.emit("stderr", this.#stderrPartial)
         this.#stderrPartial = ""
@@ -153,7 +192,7 @@ export class AcpClient extends EventEmitter {
       const reason = this.#stderrSummary()
       this.#handleExit(new Error(
         `ACP adapter exited (${code ?? "unknown"}${signal ? `, ${signal}` : ""})${reason ? `: ${reason}` : ""}`
-      ))
+      ), child)
     })
 
     try {
@@ -171,16 +210,20 @@ export class AcpClient extends EventEmitter {
       // environment variable that is usually unset, and fail later at inference rather than here.
       // Codex's adapter lists `api-key` first too, but its ChatGPT login method is what reads a
       // `codex login` from disk, so a profile may name the method its harness expects.
-      const authMethods = Array.isArray(initialized.authMethods) ? initialized.authMethods : []
-      let authMethod = this.#preferredAuthMethod
-        ? authMethods.find((method) => method?.id === this.#preferredAuthMethod)
-        : undefined
-      authMethod ??= authMethods.find((method) => method?.id === "agent")
-        ?? authMethods.find((method) => method?.id && method.type !== "env_var")
-        ?? authMethods.find((method) => method?.id)
-      if (authMethod) await this.request("authenticate", { methodId: authMethod.id }, remaining("authenticate"))
+      if (this.#authenticate) {
+        const authMethods = Array.isArray(initialized.authMethods) ? initialized.authMethods : []
+        let authMethod = this.#preferredAuthMethod
+          ? authMethods.find((method) => method?.id === this.#preferredAuthMethod)
+          : undefined
+        authMethod ??= authMethods.find((method) => method?.id === "agent")
+          ?? authMethods.find((method) => method?.id && method.type !== "env_var")
+          ?? authMethods.find((method) => method?.id)
+        if (authMethod) await this.request("authenticate", { methodId: authMethod.id }, remaining("authenticate"))
+      }
     } catch (error) {
-      this.close()
+      // A concurrent close may already have released this child and allowed a later start. Never
+      // let an earlier handshake's rejection close that newer process.
+      if (this.#child === child) await this.close()
       throw error
     }
   }
@@ -206,6 +249,8 @@ export class AcpClient extends EventEmitter {
         startedAt,
         lastActivityAt: startedAt,
         timeoutMs,
+        watchdogMs: timeoutMs,
+        toolCalls: new Set(),
         resetTimeout: undefined
       }
       const expire = () => {
@@ -215,7 +260,8 @@ export class AcpClient extends EventEmitter {
       pending.resetTimeout = () => {
         pending.lastActivityAt = Date.now()
         clearTimeout(pending.timer)
-        pending.timer = setTimeout(expire, timeoutMs)
+        pending.watchdogMs = pending.toolCalls.size ? Math.max(timeoutMs, ACTIVE_TOOL_TIMEOUT_MS) : timeoutMs
+        pending.timer = setTimeout(expire, pending.watchdogMs)
       }
       pending.resetTimeout()
       this.#pending.set(id, pending)
@@ -252,8 +298,15 @@ export class AcpClient extends EventEmitter {
   close() {
     const child = this.#child
     this.#child = undefined
-    if (child && !child.killed) child.kill()
     this.#rejectPending(new Error("ACP adapter closed"))
+    this.#starting = undefined
+    if (!child) return this.#closingPromise || Promise.resolve()
+    const closing = closeOwnedChildProcess(child)
+    this.#closingPromise = closing
+    void closing.finally(() => {
+      if (this.#closingPromise === closing) this.#closingPromise = undefined
+    }).catch(() => {})
+    return closing
   }
 
   #consume(chunk) {
@@ -262,7 +315,14 @@ export class AcpClient extends EventEmitter {
     while (boundary !== -1) {
       const line = this.#buffer.slice(0, boundary).trim()
       this.#buffer = this.#buffer.slice(boundary + 1)
-      if (line) this.#consumeMessage(line)
+      if (line) {
+        // A listener throwing here would escape the stdout handler and crash the whole bridge.
+        try {
+          this.#consumeMessage(line)
+        } catch (error) {
+          this.emit("protocol-error", new Error(`ACP adapter message handling failed: ${error?.message ?? error}`, { cause: error }))
+        }
+      }
       boundary = this.#buffer.indexOf("\n")
     }
   }
@@ -275,18 +335,23 @@ export class AcpClient extends EventEmitter {
       this.emit("protocol-error", new Error("ACP adapter emitted invalid JSON"))
       return
     }
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      this.emit("protocol-error", new Error("ACP adapter emitted a non-object JSON-RPC message"))
+      return
+    }
 
     // A long ACP prompt is alive as long as that same Session keeps producing protocol traffic.
     // Treat its timeout as an inactivity watchdog, not a wall-clock cap on legitimate long turns.
-    if (typeof message.params?.sessionId === "string") this.#touchSessionActivity(message.params.sessionId)
+    if (typeof message.params?.sessionId === "string") this.#touchSessionActivity(message.params.sessionId, message.params.update)
 
     // A JSON-RPC message carrying both an id and a method is an agent-initiated
     // request. An unanswered request would stall the agent until the prompt
     // timeout, so always reply.
     if (message.id !== undefined && message.method) {
-      this.emit("agent-request", message)
       if (message.method === "session/request_permission") this.#respondPermission(message.id, message.params)
       else this.#respondUnsupported(message.id, message.method)
+      // Observers run after the reply so a throwing listener cannot leave the agent waiting.
+      this.emit("agent-request", message)
       return
     }
     if (message.id !== undefined) {
@@ -301,9 +366,14 @@ export class AcpClient extends EventEmitter {
     if (message.method) this.emit("notification", message)
   }
 
-  #touchSessionActivity(sessionID) {
+  #touchSessionActivity(sessionID, update) {
     for (const pending of this.#pending.values()) {
       if (pending.method !== "session/prompt" || pending.sessionID !== sessionID) continue
+      if ((update?.sessionUpdate === "tool_call" || update?.sessionUpdate === "tool_call_update")
+        && typeof update.toolCallId === "string") {
+        if (["completed", "error", "failed", "cancelled"].includes(update.status)) pending.toolCalls.delete(update.toolCallId)
+        else pending.toolCalls.add(update.toolCallId)
+      }
       pending.resetTimeout?.()
     }
   }
@@ -319,15 +389,15 @@ export class AcpClient extends EventEmitter {
     if (!this.#child?.stdin.writable) return
     const options = Array.isArray(params?.options) ? params.options : []
     const allowed = this.#permissionMode === "allow"
-      ? options.find((option) => option.kind === "allow_once")
-        ?? options.find((option) => option.kind === "allow_always")
-        ?? options.find((option) => typeof option.kind === "string" && option.kind.startsWith("allow"))
+      ? options.find((option) => option?.kind === "allow_once")
+        ?? options.find((option) => option?.kind === "allow_always")
+        ?? options.find((option) => typeof option?.kind === "string" && option.kind.startsWith("allow"))
       : undefined
     const outcome = allowed?.optionId
       ? { outcome: "selected", optionId: allowed.optionId }
       : { outcome: "cancelled" }
-    this.emit("permission", { optionId: allowed?.optionId })
     this.#child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, result: { outcome } })}\n`)
+    this.emit("permission", { optionId: allowed?.optionId })
   }
 
   #respondUnsupported(id, method) {
@@ -346,8 +416,8 @@ export class AcpClient extends EventEmitter {
     return lines.slice(-3).join(" ")
   }
 
-  #handleExit(error) {
-    if (!this.#child) return
+  #handleExit(error, child) {
+    if (!child || this.#child !== child) return
     this.#child = undefined
     this.#rejectPending(error)
     this.emit("exit", error)

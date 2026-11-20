@@ -16,6 +16,7 @@ test("defaults to a loopback-only unauthenticated listener", () => {
     roots: [],
     corsOrigins: [],
     logRequests: false,
+    verbose: false,
     stateDirectory: path.join(homedir(), ".harness-remote")
   })
 })
@@ -47,14 +48,27 @@ test("selects PI defaults for the ACP backend", () => {
 })
 
 test("selects Codex defaults for the ACP backend", () => {
-  const expectedArgs = ["--yes", "--package=@agentclientprotocol/codex-acp@1.1.14", "codex-acp"]
-  assert.deepEqual(parseConfig(["--backend", "codex"], {}).backend, "codex")
-  assert.equal(parseConfig(["--backend", "codex"], {}).acpCommand, process.platform === "win32" ? "npx.cmd" : "npx")
+  const expectedArgs = ["--yes", "--package=@agentclientprotocol/codex-acp@1.13.1", "codex-acp"]
+  const withoutInstalledAdapter = { resolveLaunch: profile => ({ command: profile.command, args: profile.args }) }
+  assert.deepEqual(parseConfig(["--backend", "codex"], {}, withoutInstalledAdapter).backend, "codex")
+  assert.equal(parseConfig(["--backend", "codex"], {}, withoutInstalledAdapter).acpCommand, process.platform === "win32" ? "npx.cmd" : "npx")
   // The adapter embeds @openai/codex, so no separate Codex installation is required; the
   // version is pinned for the same `notarget` reason PI and Claude document.
-  assert.deepEqual(parseConfig(["--backend", "codex"], {}).acpArgs, expectedArgs)
-  assert.deepEqual(parseConfig([], { OMP_BRIDGE_BACKEND: "codex" }).acpArgs, expectedArgs)
-  assert.match(parseConfig(["--backend", "codex"], {}).acpArgs[1], /@\d+\.\d+\.\d+$/, "the adapter version must stay pinned")
+  assert.deepEqual(parseConfig(["--backend", "codex"], {}, withoutInstalledAdapter).acpArgs, expectedArgs)
+  assert.deepEqual(parseConfig([], { OMP_BRIDGE_BACKEND: "codex" }, withoutInstalledAdapter).acpArgs, expectedArgs)
+  assert.match(parseConfig(["--backend", "codex"], {}, withoutInstalledAdapter).acpArgs[1], /@\d+\.\d+\.\d+$/, "the adapter version must stay pinned")
+})
+
+test("selects OpenCode 2 package fallback and MiMo native ACP defaults", () => {
+  const openCode2 = parseConfig(["--backend", "opencode2"], {}, { resolveLaunch: (profile) => ({ command: profile.command, args: profile.args }) })
+  assert.equal(openCode2.backend, "opencode2")
+  assert.equal(openCode2.acpCommand, process.platform === "win32" ? "npx.cmd" : "npx")
+  assert.deepEqual(openCode2.acpArgs, ["--yes", "--package=@opencode/cli@2.0.28", "opencode2", "acp"])
+
+  const mimo = parseConfig(["--backend", "mimo"], {})
+  assert.equal(mimo.backend, "mimo")
+  assert.equal(mimo.acpCommand, "mimo")
+  assert.deepEqual(mimo.acpArgs, ["acp"])
 })
 
 test("prefers generic environment names while retaining OMP aliases", () => {
@@ -81,6 +95,16 @@ test("prefers generic environment names while retaining OMP aliases", () => {
   assert.equal(legacy.backend, "pi")
   assert.equal(legacy.host, "localhost")
   assert.equal(legacy.port, 4902)
+})
+
+test("accepts Session lifecycle overrides without changing other providers", () => {
+  assert.deepEqual(parseConfig([], {
+    HARNESS_REMOTE_IDLE_UNLOAD_MS: "0",
+    HARNESS_REMOTE_MAX_LOADED_SESSIONS: "2"
+  }).sessionLifecycle, { idleUnloadMs: 0, maxLoadedSessions: 2 })
+  assert.equal(parseConfig([], {}).sessionLifecycle, undefined)
+  assert.throws(() => parseConfig([], { HARNESS_REMOTE_IDLE_UNLOAD_MS: "-1" }), /non-negative integer/)
+  assert.throws(() => parseConfig([], { HARNESS_REMOTE_MAX_LOADED_SESSIONS: "1.5" }), /non-negative integer/)
 })
 
 test("allows session snapshot storage to be relocated", () => {
@@ -115,4 +139,10 @@ test("accepts authenticated LAN configuration and repeated roots", () => {
 test("enables safe request diagnostics explicitly", () => {
   assert.equal(parseConfig(["--log-requests"], {}).logRequests, true)
   assert.equal(parseConfig([], { OMP_BRIDGE_LOG_REQUESTS: "1" }).logRequests, true)
+})
+
+test("keeps harness diagnostics quiet unless verbose is requested", () => {
+  assert.equal(parseConfig([], {}).verbose, false)
+  assert.equal(parseConfig(["--verbose"], {}).verbose, true)
+  assert.equal(parseConfig([], { HARNESS_REMOTE_VERBOSE: "1" }).verbose, true)
 })

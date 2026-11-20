@@ -5,6 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import { AcpService } from "../src/acp-service.js"
+import { TranscriptCache, transcriptWeight } from "../src/transcript-cache.js"
 
 class ListingAcp extends EventEmitter {
   constructor(sessions) {
@@ -168,4 +169,137 @@ test("authoritative journal transcripts are not duplicated into bridge snapshots
   } finally {
     await rm(stateDirectory, { recursive: true, force: true })
   }
+})
+
+// One notification per transcript record, as Claude replays; each tool input counts its serialisations.
+class ClaudeReplay extends EventEmitter {
+  promptCapabilities = {}
+  inputReads = 0
+  constructor(turns, onReplayed = () => {}) {
+    super()
+    this.turns = turns
+    this.onReplayed = onReplayed
+  }
+  async start() {}
+  async listSessions() { return [{ sessionId: "claude-long", cwd: "/repo" }] }
+  notify() {}
+  async request(method, params) {
+    const update = (value) => this.emit("notification", { method: "session/update", params: { sessionId: "claude-long", update: value } })
+    const rawInput = { toJSON: () => { this.inputReads += 1; return { command: "grep -rn x src" } } }
+    if (method === "session/load") {
+      for (let turn = 0; turn < this.turns; turn += 1) {
+        update({ sessionUpdate: "user_message_chunk", messageId: `u${turn}`, content: { type: "text", text: `question ${turn}` } })
+        update({ sessionUpdate: "tool_call", toolCallId: `t${turn}`, title: "grep", status: "pending", rawInput })
+        update({ sessionUpdate: "tool_call_update", toolCallId: `t${turn}`, status: "completed", rawOutput: "x".repeat(2_000) })
+        update({ sessionUpdate: "agent_message_chunk", messageId: `msg_${turn}`, content: { type: "text", text: "Found it" } })
+        update({ sessionUpdate: "agent_message_chunk", messageId: `msg_${turn}`, content: { type: "text", text: " in src." } })
+      }
+      this.onReplayed()
+      return { configOptions: [] }
+    }
+    if (method === "session/prompt") {
+      if (params.prompt.some((block) => block.text === "Fail")) throw new Error("x".repeat(1_000))
+      update({ sessionUpdate: "agent_message_chunk", messageId: "msg_live", content: { type: "text", text: "Looking." } })
+      update({ sessionUpdate: "tool_call", toolCallId: "t_live", title: "ls", status: "pending", rawInput: { command: "ls" } })
+      return { stopReason: "end_turn" }
+    }
+    return {}
+  }
+}
+
+test("a Claude replay of N chunks weighs its transcript O(N) times, and the tracked weight stays exact", async (t) => {
+  // diagnostics() re-weighs everything first, so read the weight the service's own cache tracks.
+  const set = TranscriptCache.prototype.set
+  let cache
+  TranscriptCache.prototype.set = function (...args) {
+    cache = this
+    return set.apply(this, args)
+  }
+  t.after(() => { TranscriptCache.prototype.set = set })
+  const real = () => Array.from(cache.values()).reduce((sum, messages) => sum + transcriptWeight(messages), 0)
+  const snapshotDirectory = await mkdtemp(path.join(os.tmpdir(), "hr-transcript-weight-"))
+  try {
+    const replay = async (turns) => {
+      const acp = new ClaudeReplay(turns, () => {
+        const reads = acp.inputReads
+        assert.equal(cache.weight, real(), "growth is reported while the replay lands")
+        acp.inputReads = reads
+      })
+      const service = new AcpService(acp, { snapshotDirectory: path.join(snapshotDirectory, String(turns)) })
+      await service.messages("claude-long")
+      return { reads: acp.inputReads, service }
+    }
+    const small = await replay(100)
+    const large = await replay(400)
+    assert.ok(large.reads / small.reads < 8, `4x the chunks cost ${(large.reads / small.reads).toFixed(1)}x the weighing`)
+
+    // Only settling the tool call a turn left open goes unreported, and that is a few bytes.
+    const lags = []
+    large.service.subscribe((event) => { if (event.type === "message.updated") lags.push(real() - cache.weight) })
+    await large.service.promptAndWait("claude-long", "Look again")
+    await assert.rejects(large.service.promptAndWait("claude-long", "Fail"))
+    assert.ok(lags.length >= 4 && lags.every((lag) => Math.abs(lag) < 100), `tracked weight was off by ${lags}`)
+    await small.service.flushSnapshots()
+    await large.service.flushSnapshots()
+    assert.equal(cache.weight, real(), "the snapshot write weighs what no chunk reported")
+  } finally {
+    await rm(snapshotDirectory, { recursive: true, force: true })
+  }
+})
+
+test("prompting a Session whose history is over the memory budget does not leave it busy", async () => {
+  const acp = new EventEmitter()
+  let prompted
+  Object.assign(acp, {
+    promptCapabilities: {},
+    async start() {},
+    async listSessions() { return [{ sessionId: "claude-long", cwd: "/repo" }] },
+    notify() {},
+    async request(method) {
+      if (method !== "session/load") {
+        // Read while the turn runs: once it ends, the budget may evict this transcript as usual.
+        prompted = (await service.messages("claude-long")).find((message) => message.info.role === "user")
+        return { stopReason: "end_turn" }
+      }
+      acp.emit("notification", { method: "session/update", params: { sessionId: "claude-long", update: { sessionUpdate: "agent_message_chunk", messageId: "msg_1", content: { type: "text", text: "x".repeat(25 * 1024 * 1024) } } } })
+      return {}
+    }
+  })
+  const service = new AcpService(acp)
+  await service.messages("claude-long")
+  await service.prompt("claude-long", "y".repeat(2_000))
+  for (let wait = 0; wait < 200 && service.status("claude-long").type === "busy"; wait += 1) await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(service.status("claude-long").type, "idle", "the Session stayed busy")
+  assert.equal(prompted?.parts[0].text, "y".repeat(2_000), "the prompt was lost")
+})
+
+test("a queued prompt that starts on a Session over the memory budget keeps its history", async () => {
+  const acp = new EventEmitter()
+  let release
+  const firstTurn = new Promise((resolve) => { release = resolve })
+  let prompts = 0
+  let secondTurnPrompts
+  Object.assign(acp, {
+    promptCapabilities: {},
+    async start() {},
+    async listSessions() { return [{ sessionId: "claude-long", cwd: "/repo" }] },
+    notify() {},
+    async request(method) {
+      if (method === "session/load") {
+        acp.emit("notification", { method: "session/update", params: { sessionId: "claude-long", update: { sessionUpdate: "agent_message_chunk", messageId: "msg_1", content: { type: "text", text: "x".repeat(25 * 1024 * 1024) } } } })
+        return {}
+      }
+      prompts += 1
+      if (prompts === 1) await firstTurn
+      else secondTurnPrompts = (await service.messages("claude-long")).filter((message) => message.info.role === "user").map((message) => message.parts[0].text)
+      return { stopReason: "end_turn" }
+    }
+  })
+  const service = new AcpService(acp)
+  await service.messages("claude-long")
+  await service.prompt("claude-long", "first")
+  await service.prompt("claude-long", "second")
+  release()
+  for (let wait = 0; wait < 200 && (prompts < 2 || service.status("claude-long").type === "busy"); wait += 1) await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.deepEqual(secondTurnPrompts, ["first", "second"])
 })
