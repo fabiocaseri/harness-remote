@@ -1,5 +1,6 @@
 import http from "node:http"
-import { allowedOrigin, applyCorsHeaders, matchesCredentials, writeJSON } from "./http-policy.js"
+import { allowedOrigin, applyCorsHeaders, matchesCredentials, guardRequestHandler, writeJSON } from "./http-policy.js"
+import { AGENT_EVENT_MULTIPLEX_PATH, parseRequestedAgents, serveAgentEventMultiplex } from "./agent-event-multiplex.js"
 import { ManagedEventFanout } from "./managed-event-fanout.js"
 import { inspectGitProjectIdentity } from "./project-identity.js"
 import { inspectGitProjectOutcome } from "./project-outcome.js"
@@ -55,6 +56,7 @@ function internalAuthorization(host) {
 }
 
 async function readJSONBody(request) {
+  request.setEncoding("utf8")
   let body = ""
   for await (const chunk of request) {
     body += chunk
@@ -222,7 +224,7 @@ export function createAgentRoutingServer({
     eventStreams: Object.fromEntries([...eventFanouts.entries()].map(([key, fanout]) => [key, fanout.diagnostics()]))
   })
 
-  const server = createServer(async (request, response) => {
+  const server = createServer(guardRequestHandler(async (request, response) => {
     const requestURL = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`)
     let trackedRequestID
     if (requestURL.pathname !== "/v1/diagnostics") {
@@ -244,6 +246,35 @@ export function createAgentRoutingServer({
       }
       response.once("finish", finishTracking)
       response.once("close", finishTracking)
+    }
+
+    if (requestURL.pathname === AGENT_EVENT_MULTIPLEX_PATH) {
+      if (!authenticateMachineRequest(request, response, config)) return
+      if (request.method !== "GET") {
+        response.writeHead(405, { Allow: "GET, OPTIONS" })
+        response.end()
+        return
+      }
+      const agentIDs = parseRequestedAgents(requestURL.searchParams, daemon.snapshot().agents.map((agent) => agent.id))
+      if (agentIDs.length === 0) {
+        writeJSON(response, 400, { error: "At least one known agent id is required" })
+        return
+      }
+      // Each harness stream is read through this daemon's own routes, so it keeps every routing and
+      // fan-out rule a direct client gets. The caller's credentials were just verified above.
+      // The daemon wraps this router in outer servers and only the outermost one listens, so connect
+      // back to the local end of the socket this request arrived on.
+      serveAgentEventMultiplex({
+        request,
+        response,
+        agentIDs,
+        upstream: {
+          host: request.socket.localAddress,
+          port: request.socket.localPort,
+          authorization: typeof request.headers.authorization === "string" ? request.headers.authorization : undefined
+        }
+      })
+      return
     }
 
     const worktreeMatch = TASK_WORKTREE_ROUTE.exec(requestURL.pathname)
@@ -440,7 +471,7 @@ export function createAgentRoutingServer({
       if (!response.headersSent) writeJSON(response, 502, { error: error instanceof Error ? error.message : String(error) })
       else response.destroy(error instanceof Error ? error : undefined)
     }
-  })
+  }))
 
   server.on("close", () => {
     for (const fanout of eventFanouts.values()) fanout.close()

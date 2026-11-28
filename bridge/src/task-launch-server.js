@@ -1,5 +1,5 @@
 import http from "node:http"
-import { authenticateDaemonRequest, writeJSON } from "./http-policy.js"
+import { authenticateDaemonRequest, guardRequestHandler, writeJSON } from "./http-policy.js"
 
 const TASK_LAUNCH_ROUTE = /^\/v1\/tasks\/([^/]+)\/launch$/
 const TASK_CONTINUE_ROUTE = /^\/v1\/tasks\/([^/]+)\/continue$/
@@ -31,6 +31,7 @@ function requestError(message) {
 }
 
 async function readJSONBody(request) {
+  request.setEncoding("utf8")
   let body = ""
   for await (const chunk of request) {
     body += chunk
@@ -49,7 +50,7 @@ export function launchStatus(error) {
 }
 
 export function createTaskLaunchServer({ innerServer, config, taskRunController, createServer = http.createServer }) {
-  return createServer(async (request, response) => {
+  return createServer(guardRequestHandler(async (request, response) => {
     const requestURL = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`)
     const launchMatch = TASK_LAUNCH_ROUTE.exec(requestURL.pathname)
     const continueMatch = TASK_CONTINUE_ROUTE.exec(requestURL.pathname)
@@ -97,5 +98,5 @@ export function createTaskLaunchServer({ innerServer, config, taskRunController,
         ...(error?.code ? { code: error.code } : {})
       })
     }
-  })
+  }))
 }

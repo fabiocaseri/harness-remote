@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { ChevronDownIcon } from "../Icons"
-import type { ModelOption } from "../types"
+import { ChevronDownIcon, SearchIcon } from "../Icons"
+import type { ModelOption, ModelSelection } from "../types"
+import { useTranslator } from "../useTranslator"
 import "../model-picker.css"
+import { providerIconUrl } from "../harness-icons"
 
 type Props = {
   models: ModelOption[]
@@ -11,8 +13,13 @@ type Props = {
   loading?: boolean
   placeholder?: string
   compact?: boolean
+  /** Touch-first: open on the list, not on a focused search field (which would raise the keyboard);
+      a floating magnifier reveals the search on demand. */
+  searchOnDemand?: boolean
   /** Shown instead of the placeholder when discovery finished without a usable catalog. */
   unavailableHint?: string
+  /** Read-only identity recovered from the current native session; never added to the catalog. */
+  currentModel?: ModelSelection | null
 }
 
 export type ModelGroup = {
@@ -74,11 +81,23 @@ export function groupModels(models: ModelOption[]): ModelGroup[] {
       options
     }
   }).sort((left, right) => {
+    const priority = (group: ModelGroup) => group.options.find((option) => Number.isFinite(option.sortPriority))?.sortPriority
+    const leftPriority = priority(left) ?? Number.POSITIVE_INFINITY
+    const rightPriority = priority(right) ?? Number.POSITIVE_INFINITY
+    if (leftPriority !== rightPriority) return leftPriority - rightPriority
     const leftDefault = left.options.some((option) => option.isDefault) ? 0 : 1
     const rightDefault = right.options.some((option) => option.isDefault) ? 0 : 1
     if (leftDefault !== rightDefault) return leftDefault - rightDefault
     return left.providerName.localeCompare(right.providerName) || left.modelName.localeCompare(right.modelName)
   })
+}
+
+export function visibleModelGroups(models: ModelOption[]): ModelGroup[] {
+  // ACP `isDefault` marks the model the harness is currently using (the bridge derives it from
+  // `currentValue`), not proof that the `default` alias resolves to that same model. Hiding the
+  // alias whenever another model is marked would strand the user on an explicit choice with no
+  // way back to the harness default, so the alias always stays selectable.
+  return groupModels(models)
 }
 
 export function filterModelGroups(groups: ModelGroup[], query: string, freeOnly = false): ModelGroup[] {
@@ -108,18 +127,25 @@ function ModelBadges({ group }: { group: ModelGroup }) {
   )
 }
 
-export function ModelPicker({ models, value, onChange, disabled = false, loading = false, placeholder = "Choose model", compact = false, unavailableHint }: Props) {
+export function ModelPicker({ models, value, onChange, disabled = false, loading = false, placeholder = "Choose model", compact = false, searchOnDemand = false, unavailableHint, currentModel }: Props) {
+  const t = useTranslator()
   const [open, setOpen] = useState(false)
+  const [searchShown, setSearchShown] = useState(!searchOnDemand)
   const [query, setQuery] = useState("")
   const [freeOnly, setFreeOnly] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
-  const groups = useMemo(() => groupModels(models), [models])
+  const groups = useMemo(() => visibleModelGroups(models), [models])
   const freeCount = useMemo(
     () => groups.filter((group) => group.options.some((option) => option.isFree === true)).length,
     [groups]
   )
   const selected = models.find((model) => modelOptionKey(model) === value)
+  // A native session can report its current model even after that model disappears from the live
+  // catalog. Show that identity only while it is still the current selection (or the picker has no
+  // selectable value); it remains read-only and can never be sent as an unverified catalog choice.
+  const nativeCurrent = currentModel && (!value || modelOptionKey(currentModel) === value) ? currentModel : null
+  const displayModel = selected || nativeCurrent
 
   const filtered = useMemo(() => filterModelGroups(groups, query, freeOnly), [freeOnly, groups, query])
   const visibleGroups = useMemo(() => filtered.slice(0, MAX_VISIBLE_MODEL_GROUPS), [filtered])
@@ -143,7 +169,7 @@ export function ModelPicker({ models, value, onChange, disabled = false, loading
     }
     document.addEventListener("pointerdown", onPointerDown)
     document.addEventListener("keydown", onKeyDown)
-    const timer = window.setTimeout(() => searchRef.current?.focus(), 0)
+    const timer = window.setTimeout(() => { if (searchShown) searchRef.current?.focus() }, 0)
     return () => {
       window.clearTimeout(timer)
       document.removeEventListener("pointerdown", onPointerDown)
@@ -152,8 +178,11 @@ export function ModelPicker({ models, value, onChange, disabled = false, loading
   }, [open])
 
   useEffect(() => {
-    if (!open) setQuery("")
-  }, [open])
+    if (!open) {
+      setQuery("")
+      setSearchShown(!searchOnDemand)
+    }
+  }, [open, searchOnDemand])
   useEffect(() => {
     if (freeOnly && freeCount === 0) setFreeOnly(false)
   }, [freeCount, freeOnly])
@@ -168,12 +197,15 @@ export function ModelPicker({ models, value, onChange, disabled = false, loading
   // catalog is empty the conversation still starts — on the harness-native default — so say that
   // instead of leaving a dead dropdown with no explanation.
   const empty = !loading && models.length === 0
-  const hint = unavailableHint || "No model catalog is available for this coding agent. The harness default will be used."
+  const hint = nativeCurrent
+    ? "This native session's current model is known, but it is unavailable in the current model catalog and cannot be selected."
+    : unavailableHint || "No model catalog is available for this coding agent. The harness default will be used."
+  const displayModelName = selected?.modelName || nativeCurrent?.modelID
   const triggerLabel = loading
-    ? "Loading models…"
+    ? t("composer.loadingModels")
     : empty
-      ? "Harness default"
-      : selected?.modelName || selected?.modelID || placeholder
+      ? displayModelName || "Harness default"
+      : displayModelName || placeholder
 
   return (
     <div className={`tdw-model-picker${compact ? " compact" : ""}${open ? " open" : ""}${empty ? " unavailable" : ""}`} ref={rootRef}>
@@ -188,22 +220,39 @@ export function ModelPicker({ models, value, onChange, disabled = false, loading
         }}
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-busy={loading || undefined}
       >
         <span className="tdw-model-trigger-copy">
-          <strong>{triggerLabel}</strong>
-          {!loading && selected ? <small>{selected.providerName || selected.providerID}{selected.variant ? ` · ${selected.variant}` : ""}</small> : null}
-          {empty ? <small>Chosen by the coding agent</small> : null}
+          <strong>{triggerLabel}{!loading && !selected && nativeCurrent?.variant ? ` · ${nativeCurrent.variant}` : ""}</strong>
+          {!loading && Boolean(displayModel) ? <small>{selected?.providerName || displayModel?.providerID}{displayModel?.variant ? ` · ${displayModel.variant}` : ""}</small> : null}
+          {empty ? <small>{nativeCurrent ? "Current native model · unavailable in catalog" : "Chosen by the coding agent"}</small> : null}
         </span>
         <span className="tdw-model-chevron" aria-hidden="true"><ChevronDownIcon size={13} /></span>
       </button>
 
       {open ? (
         <div className="tdw-model-popover" role="listbox" aria-label="Models">
-          <div className="tdw-model-search-wrap">
-            <span aria-hidden="true">⌕</span>
-            <input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search model, provider, variant…" spellCheck={false} />
-            <kbd>{filtered.length}</kbd>
-          </div>
+          {searchShown ? (
+            <div className="tdw-model-search-wrap">
+              <span aria-hidden="true">⌕</span>
+              <input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search model, provider, variant…" spellCheck={false} />
+              <kbd>{filtered.length}</kbd>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="tdw-model-search-fab"
+              aria-label={t("card.searchModels")}
+              title={t("card.searchModels")}
+              onClick={(event) => {
+                event.preventDefault()
+                setSearchShown(true)
+                window.setTimeout(() => searchRef.current?.focus(), 0)
+              }}
+            >
+              <SearchIcon size={18} />
+            </button>
+          )}
           {freeCount > 0 ? (
             <div className="tdw-model-filter-row">
               <button type="button" className={freeOnly ? "active" : ""} onClick={() => setFreeOnly((current) => !current)} aria-pressed={freeOnly}>
@@ -215,7 +264,7 @@ export function ModelPicker({ models, value, onChange, disabled = false, loading
           <div className="tdw-model-results">
             {providers.length === 0 ? <div className="tdw-model-empty"><strong>No models found</strong><span>Try another model name, provider or variant.</span></div> : providers.map(([provider, providerModels]) => (
               <section className="tdw-model-provider" key={provider}>
-                <header><strong>{provider}</strong><span>{providerModels.length} model{providerModels.length === 1 ? "" : "s"}</span></header>
+                <header>{providerIconUrl(providerModels[0]?.providerID) ? <img className="tdw-model-provider-icon" src={providerIconUrl(providerModels[0]?.providerID)} alt="" /> : null}<strong>{provider}</strong><span>{providerModels.length} model{providerModels.length === 1 ? "" : "s"}</span></header>
                 {providerModels.map((group) => {
                   const baseSelected = selected && selected.providerID === group.providerID && selected.modelID === group.modelID && !selected.variant
                   return (
