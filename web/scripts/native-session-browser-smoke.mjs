@@ -441,6 +441,8 @@ function stopServer(server) {
 
 async function seed(page) {
   await page.addInitScript(({ key, port }) => {
+    // This PI contract smoke opens the Session row directly; Classic keeps Projects expanded.
+    localStorage.setItem("harness-remote.skin", "classic")
     localStorage.setItem(key, JSON.stringify([{
       id: "machine-pi-v3-first",
       name: "PI v3-first Test",
@@ -460,7 +462,7 @@ async function waitFor(predicate, description, timeout = 12_000) {
 
 async function waitForReady(page) {
   try {
-    await page.locator(".tdw-conversation-state.ready").waitFor({ state: "attached", timeout: 12_000 })
+    await page.locator(".tdw-conversation-state.ready:visible").waitFor({ state: "visible", timeout: 12_000 })
     const composer = page.getByRole("textbox", { name: "Message PI" })
     await composer.waitFor({ state: "visible", timeout: 12_000 })
     assert.equal(await composer.isDisabled(), false, "v3 composer must be enabled when the Session is ready")
@@ -528,8 +530,19 @@ async function assertStartupTransitionContract(browser, viewport, mobile) {
   assert.equal(typeof releaseBlockedSessionList, "function", "startup fixture never reached Session discovery")
 
   const startup = page.locator(".hr-native-workspace-empty.hr-native-startup.connecting")
-  await startup.waitFor({ state: "visible", timeout: 12_000 })
-  assert.match(await startup.innerText(), /Loading.*Session/i, "machine-connected startup must remain in Loading Sessions")
+  const mobileStartup = page.locator(".hr-native-startup-mobile")
+  if (mobile) {
+    await mobileStartup.waitFor({ state: "visible", timeout: 12_000 })
+    assert.match(await mobileStartup.innerText(), /Loading.*Session/i, "the phone list must show the same startup phase")
+    assert.equal(await startup.isVisible(), false, "the hidden phone detail must not announce the startup phase twice")
+    const bounds = await mobileStartup.boundingBox()
+    assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= viewport.width,
+      "the phone startup message must be inside the viewport")
+  } else {
+    await startup.waitFor({ state: "visible", timeout: 12_000 })
+    assert.match(await startup.innerText(), /Loading.*Session/i, "machine-connected startup must remain in Loading Sessions")
+    assert.equal(await mobileStartup.isVisible(), false, "desktop must use the detail-pane startup message")
+  }
   assert.equal(await page.locator(".hr-native-workspace-empty.hr-native-startup.offline").count(), 0, "startup must not claim all machines are disconnected while Sessions are still loading")
   assert.equal(await page.locator(".hr-native-machine-group.offline").count(), 0, "an already-connected machine must not render offline during Session discovery")
   const newSession = page.getByRole("button", { name: "New Session" })
@@ -538,6 +551,7 @@ async function assertStartupTransitionContract(browser, viewport, mobile) {
 
   releaseBlockedSessionList?.()
   await page.getByRole("button", { name: /PI v3-first regression session/ }).waitFor({ state: "visible", timeout: 12_000 })
+  if (mobile) await mobileStartup.waitFor({ state: "detached", timeout: 12_000 })
   assert.equal(await newSession.isDisabled(), false, "New Session must enable only after real Session discovery completes")
   await context.close()
 }
@@ -555,7 +569,7 @@ async function assertExistingSessionContract(browser, viewport, mobile) {
 
   await openSession(page, "PI v3-first regression session")
   assert.equal(claimCount, 0, "opening and reading an external PI Session must not claim its writer")
-  assert.ok(modelCatalogReads > 0, "the mature v3 controller must load the PI model catalog without claiming writer ownership")
+  await waitFor(() => modelCatalogReads > 0, "the mature v3 controller to load the PI model catalog without claiming writer ownership")
   await waitFor(() => sseResponses.size > 0, "PI v3 live event connection")
 
   for (const marker of ["PI-HISTORY-USER-1", "PI-HISTORY-ASSISTANT-1", "PI-HISTORY-USER-2", "PI-HISTORY-ASSISTANT-2"]) {
@@ -591,14 +605,14 @@ async function assertExistingSessionContract(browser, viewport, mobile) {
   assert.equal(await page.getByText(SUCCESS_PROMPT, { exact: true }).count(), 1, "PI success prompt duplicated")
   assert.equal(await page.getByText(SUCCESS_REPLY, { exact: true }).count(), 1, "PI final answer duplicated")
 
-  const activity = page.locator(".uw-activity-group").last()
-  await activity.locator("summary").click()
+  const activity = page.locator(".hr-activity").last()
+  await activity.locator(".hr-activity-toggle").click()
   await page.getByText("PI reasoning marker", { exact: true }).waitFor({ state: "visible" })
   assert.equal(await page.getByText("PI reasoning marker", { exact: true }).count(), 1, "PI reasoning duplicated")
-  assert.equal(await activity.locator(".uw-tool-card").count(), 1, "PI tool updates with different message ids must converge by call identity")
+  assert.equal(await activity.locator(".hr-act-tool").count(), 1, "PI tool updates with different message ids must converge by call identity")
   assert.equal(await page.getByText("PI working note before tool", { exact: true }).count(), 1, "PI working note duplicated")
 
-  const orderedMarkers = [SUCCESS_PROMPT, "PI reasoning marker", "PI working note before tool", "PI tool", SUCCESS_REPLY]
+  const orderedMarkers = [SUCCESS_PROMPT, "PI reasoning marker", "PI working note before tool", "printf pi", SUCCESS_REPLY]
   const ordered = await page.locator(".uw-transcript").evaluate((element, markers) => {
     const text = element.textContent || ""
     return markers.map((value) => text.indexOf(value))
@@ -703,6 +717,37 @@ async function assertExistingSessionContract(browser, viewport, mobile) {
     assert.equal(await page.getByText(marker, { exact: true }).count(), 1, `refresh duplicated transcript marker: ${marker}`)
   }
   assert.equal(await page.getByRole("button", { name: "Continue with another agent" }).count(), 0, "cross-agent handoff UI must stay disabled during single-Session parity work")
+
+  // Scrolled past, an open Activity header sticks flush to the transcript's top, chevron turned.
+  const firstActivity = page.locator(".hr-activity").first()
+  if (!(await firstActivity.evaluate((section) => section.classList.contains("is-open")))) await firstActivity.locator(".hr-activity-toggle").click()
+  const stuck = await firstActivity.evaluate(async (section) => {
+    const transcript = section.closest(".uw-transcript")
+    const frame = section.querySelector(".hr-activity-frame")
+    const head = frame.querySelector(".hr-activity-head")
+    const chevron = head.querySelector(".hr-act-chevron")
+    const restore = transcript.scrollTop
+    const edge = () => transcript.getBoundingClientRect().top + transcript.clientTop
+    await Promise.all(chevron.getAnimations().map((animation) => animation.finished))
+    const rise = Math.min(24, frame.offsetHeight - head.offsetHeight - 1)
+    transcript.scrollTo({ top: transcript.scrollTop + frame.getBoundingClientRect().top - edge() + rise, behavior: "instant" })
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    const style = getComputedStyle(head)
+    const result = {
+      frameAboveEdge: edge() - frame.getBoundingClientRect().top,
+      position: style.position,
+      top: parseFloat(style.top),
+      paddingTop: parseFloat(getComputedStyle(transcript).paddingTop),
+      gap: head.getBoundingClientRect().top - edge(),
+      chevron: getComputedStyle(chevron).transform
+    }
+    transcript.scrollTo({ top: restore, behavior: "instant" })
+    return result
+  })
+  assert.ok(stuck.frameAboveEdge > 0, `the open Activity section must scroll above the transcript's top: ${JSON.stringify(stuck)}`)
+  assert.equal(stuck.position, "sticky", "an open Activity header must stay in view")
+  assert.notEqual(stuck.chevron, "none", "an open Activity header must turn its chevron")
+  assert.ok(Math.abs(stuck.top + stuck.paddingTop) <= 1 && Math.abs(stuck.gap) <= 1, `the stuck Activity header must sit flush with the transcript's top: ${JSON.stringify(stuck)}`)
 
   const composer = await page.locator(".uw-composer-shell").boundingBox()
   const size = page.viewportSize()
